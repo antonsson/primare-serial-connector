@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Primare I22",
+        "description": "Enter the address of your Primare I22 REST service (running on the Raspberry Pi).",
+        "data": {
+          "host": "Host (IP or hostname)",
+          "port": "Port",
+          "scan_interval": "Poll interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Primare I22 service. Check the host/port and that the service is running.",
+      "unknown": "Unexpected error. Check the HA logs."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "domain": "primare_i22",
+  "name": "Primare I22 Amplifier",
+  "version": "1.0.0",
+  "documentation": "https://github.com/YOUR_USERNAME/primare-i22-rs232",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "local_polling",
+  "config_flow": true
+}

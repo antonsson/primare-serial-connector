@@ -1,0 +1,22 @@
+services:
+  primare-i22:
+    build:
+      context: ./service
+      dockerfile: Dockerfile
+    image: primare-i22-rs232:latest
+    container_name: primare-i22
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    environment:
+      - PRIMARE_PORT=/dev/ttyUSB0
+      - PRIMARE_LISTEN=0.0.0.0:3000
+      - RUST_LOG=primare_i22_rs232=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
