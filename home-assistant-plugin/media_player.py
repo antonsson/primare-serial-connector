@@ -134,7 +134,7 @@ class PrimareMediaPlayer(MediaPlayerEntity):
 
     @property
     def state(self) -> MediaPlayerState:
-        return MediaPlayerState.ON if self._status.get("power") else MediaPlayerState.STANDBY
+        return MediaPlayerState.ON if self._status.get("power") else MediaPlayerState.OFF
 
     @property
     def volume_level(self) -> float | None:
