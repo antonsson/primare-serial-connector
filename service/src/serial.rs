@@ -5,7 +5,7 @@ use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, warn};
 
 use crate::error::{AppError, ApiResult};
-use crate::protocol::{self, Reply, var, direct, build_write, build_read};
+use crate::protocol::{self, Reply, var, direct, build_write, build_read, build_frame, CMD_READ};
 
 pub struct SerialConnection {
     port: tokio_serial::SerialStream,
@@ -47,7 +47,7 @@ impl SerialConnection {
         Ok(())
     }
 
-    /// Read bytes until we see DLE ETX (0x10 0x03), handling escaped DLE.
+    /// Read bytes until we see an unescaped DLE ETX (0x10 0x03).
     async fn read_frame(&mut self) -> ApiResult<Vec<u8>> {
         let mut buf = Vec::new();
         let mut prev_was_dle = false;
@@ -63,34 +63,49 @@ impl SerialConnection {
                 if b == protocol::ETX {
                     return Ok(buf);
                 }
-                // If b == DLE it was an escaped DLE, continue
-                prev_was_dle = b == protocol::DLE;
+                // DLE DLE is an escaped DLE data byte — reset state so the
+                // next byte is treated fresh, not as "after a DLE".
+                prev_was_dle = false;
             } else {
                 prev_was_dle = b == protocol::DLE;
             }
         }
     }
 
-    // ---- Helper methods for direct-mode reads/writes ----
+    // ---- Private helpers ----
 
-    /// Read a variable in direct mode, returning the value byte.
+    /// Encode the step direction as the relative value the protocol expects:
+    /// up = 0x01 (increase by 1), down = 0xFF (-1 as u8).
+    fn step_byte(up: bool) -> u8 {
+        if up { 0x01 } else { 0xFF }
+    }
+
+    /// Read a variable's current value via direct mode.
+    /// Sends value 0x00 which, per protocol spec, replies with the current
+    /// value without changing state when verbose mode is active.
     async fn read_direct(&mut self, var: u8) -> ApiResult<u8> {
         let frame = build_write(direct(var), Some(0x00));
         let reply = self.send_recv(&frame).await?;
         reply.value().ok_or(AppError::InvalidReply)
     }
 
-    /// Write a value to a variable in direct mode, returning the reply value.
+    /// Write a value to a variable in direct mode, returning the confirmed value.
     async fn write_direct(&mut self, var: u8, value: u8) -> ApiResult<u8> {
         let frame = build_write(direct(var), Some(value));
         let reply = self.send_recv(&frame).await?;
         reply.value().ok_or(AppError::InvalidReply)
     }
 
+    /// Read a text (ASCII) variable using CMD_READ, returning the decoded string.
+    async fn read_text(&mut self, variable: u8) -> ApiResult<String> {
+        let frame = build_read(variable);
+        let reply = self.send_recv(&frame).await?;
+        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+    }
+
     // ---- Higher-level commands ----
 
     pub async fn enable_verbose(&mut self) -> ApiResult<()> {
-        // Set verbose = 1 (direct)
         let frame = build_write(direct(var::VERBOSE), Some(0x01));
         match self.send_recv(&frame).await {
             Ok(_) => Ok(()),
@@ -105,12 +120,19 @@ impl SerialConnection {
     // --- Power ---
 
     pub async fn get_power(&mut self) -> ApiResult<bool> {
+        // Standby var: 0x00 = standby (off), 0x01 = operate (on)
         Ok(self.read_direct(var::STANDBY).await? == 0x01)
     }
 
     pub async fn set_power(&mut self, on: bool) -> ApiResult<bool> {
-        let value = if on { 0x01 } else { 0x00 };
-        Ok(self.write_direct(var::STANDBY, value).await? == 0x01)
+        // Use IR "Operate/Standby (unique)" commands to unambiguously force
+        // state — avoids the 0x00 collision between "set standby" and the
+        // protocol's "reply current value without change" sentinel.
+        // IR value 0x02 = Operate only, 0x01 = Standby only (Part 1 of spec).
+        let ir_value = if on { 0x02u8 } else { 0x01u8 };
+        let frame = build_write(var::REMOTE, Some(ir_value));
+        let reply = self.send_recv(&frame).await?;
+        Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
     }
 
     pub async fn toggle_power(&mut self) -> ApiResult<bool> {
@@ -133,10 +155,9 @@ impl SerialConnection {
     }
 
     pub async fn step_volume(&mut self, up: bool) -> ApiResult<u8> {
-        let value = if up { 0x01u8 } else { 0xFFu8 };
-        let frame = build_write(var::VOLUME, Some(value));
+        let frame = build_write(var::VOLUME, Some(Self::step_byte(up)));
         let reply = self.send_recv(&frame).await?;
-        Ok(reply.value().ok_or(AppError::InvalidReply)?)
+        reply.value().ok_or(AppError::InvalidReply)
     }
 
     // --- Input ---
@@ -153,10 +174,9 @@ impl SerialConnection {
     }
 
     pub async fn step_input(&mut self, up: bool) -> ApiResult<u8> {
-        let value = if up { 0x01u8 } else { 0xFFu8 };
-        let frame = build_write(var::INPUT, Some(value));
+        let frame = build_write(var::INPUT, Some(Self::step_byte(up)));
         let reply = self.send_recv(&frame).await?;
-        Ok(reply.value().ok_or(AppError::InvalidReply)?)
+        reply.value().ok_or(AppError::InvalidReply)
     }
 
     // --- Mute ---
@@ -178,7 +198,7 @@ impl SerialConnection {
 
     // --- Balance ---
 
-    /// Returns balance as i8 (-9 to +9)
+    /// Returns balance as i8 (-9 to +9).
     pub async fn get_balance(&mut self) -> ApiResult<i8> {
         Ok(self.read_direct(var::BALANCE).await? as i8)
     }
@@ -212,7 +232,7 @@ impl SerialConnection {
     pub async fn step_dim(&mut self) -> ApiResult<u8> {
         let frame = build_write(var::DIM, Some(0x00));
         let reply = self.send_recv(&frame).await?;
-        Ok(reply.value().ok_or(AppError::InvalidReply)?)
+        reply.value().ok_or(AppError::InvalidReply)
     }
 
     // --- Menu ---
@@ -228,7 +248,6 @@ impl SerialConnection {
     }
 
     pub async fn menu_nav(&mut self, remote_value: u8) -> ApiResult<()> {
-        // Navigation uses remote command (var 0x0F) with IR value
         let frame = build_write(var::REMOTE, Some(remote_value));
         self.send_recv(&frame).await?;
         Ok(())
@@ -237,7 +256,7 @@ impl SerialConnection {
     // --- IR Input ---
 
     pub async fn get_ir_input(&mut self) -> ApiResult<bool> {
-        // false = front, true = back
+        // 0x00 = front, any other = back
         Ok(self.read_direct(var::IR_INPUT).await? != 0x00)
     }
 
@@ -246,37 +265,31 @@ impl SerialConnection {
         Ok(self.write_direct(var::IR_INPUT, value).await? != 0x00)
     }
 
-    // --- Info / Read ---
+    // --- Info ---
 
     pub async fn get_product_line(&mut self) -> ApiResult<String> {
-        let frame = build_read(var::PRODUCT_LINE);
-        let reply = self.send_recv(&frame).await?;
-        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+        self.read_text(var::PRODUCT_LINE).await
     }
 
     pub async fn get_model_name(&mut self) -> ApiResult<String> {
-        let frame = build_read(var::MODEL_NAME);
-        let reply = self.send_recv(&frame).await?;
-        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+        self.read_text(var::MODEL_NAME).await
     }
 
     pub async fn get_version(&mut self) -> ApiResult<String> {
-        let frame = build_read(var::VERSION);
-        let reply = self.send_recv(&frame).await?;
-        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+        self.read_text(var::VERSION).await
     }
 
     pub async fn get_input_name_current(&mut self) -> ApiResult<String> {
-        let frame = build_read(var::INPUT_NAME);
-        let reply = self.send_recv(&frame).await?;
-        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+        self.read_text(var::INPUT_NAME).await
     }
 
     pub async fn get_input_name(&mut self, input: u8) -> ApiResult<String> {
         if !(1..=7).contains(&input) {
             return Err(AppError::InvalidParameter("Input must be 1-7".into()));
         }
-        let frame = build_write(direct(var::INPUT_NAME), Some(input));
+        // Spec requires CMD_READ (0x52) with the direct-mode variable and
+        // the input number as the value byte.
+        let frame = build_frame(CMD_READ, direct(var::INPUT_NAME), Some(input));
         let reply = self.send_recv(&frame).await?;
         Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
     }
@@ -285,7 +298,7 @@ impl SerialConnection {
 
     pub async fn factory_reset(&mut self) -> ApiResult<()> {
         let frame = build_write(var::FACTORY_RESET, Some(0x00));
-        // No reply expected; verbose goes off
+        // No reply expected; device turns verbose off after reset.
         self.send_only(&frame).await
     }
 }

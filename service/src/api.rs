@@ -328,7 +328,8 @@ pub struct DimRequest {
     /// Direct level 0-3
     pub level: Option<u8>,
     /// true = step to next level
-    pub step: Option<bool>,
+    #[serde(default)]
+    pub step: bool,
 }
 
 async fn get_dim(State(state): State<Arc<AppState>>) -> ApiResult<Json<DimResponse>> {
@@ -344,7 +345,7 @@ async fn set_dim(
         Box::pin(async move {
             match (body.level, body.step) {
                 (Some(l), _) => s.set_dim(l).await,
-                (_, Some(true)) => s.step_dim().await,
+                (None, true) => s.step_dim().await,
                 _ => Err(AppError::InvalidParameter(
                     "Provide either 'level' (0-3) or 'step': true".into(),
                 )),
@@ -388,6 +389,10 @@ async fn menu_action(
     Ok(Json(OkResponse { ok: true }))
 }
 
+fn ir_source_str(back: bool) -> &'static str {
+    if back { "back" } else { "front" }
+}
+
 // ---- IR Input ----
 
 #[derive(Serialize)]
@@ -403,7 +408,7 @@ pub struct IrInputRequest {
 
 async fn get_ir_input(State(state): State<Arc<AppState>>) -> ApiResult<Json<IrInputResponse>> {
     let back = with_serial(&state, |s| Box::pin(async move { s.get_ir_input().await })).await?;
-    Ok(Json(IrInputResponse { source: if back { "back".into() } else { "front".into() } }))
+    Ok(Json(IrInputResponse { source: ir_source_str(back).into() }))
 }
 
 async fn set_ir_input(
@@ -419,7 +424,7 @@ async fn set_ir_input(
         })
     })
     .await?;
-    Ok(Json(IrInputResponse { source: if back { "back".into() } else { "front".into() } }))
+    Ok(Json(IrInputResponse { source: ir_source_str(back).into() }))
 }
 
 // ---- Info ----

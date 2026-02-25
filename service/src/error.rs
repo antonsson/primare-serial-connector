@@ -20,17 +20,11 @@ pub enum AppError {
 
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
-
-    #[error("Serial device not connected")]
-    NotConnected,
 }
 
 impl AppError {
     pub fn should_disconnect(&self) -> bool {
-        matches!(
-            self,
-            AppError::Serial(_) | AppError::Io(_) | AppError::Timeout | AppError::InvalidReply
-        )
+        matches!(self, AppError::Serial(_) | AppError::Io(_) | AppError::Timeout | AppError::InvalidReply)
     }
 }
 
@@ -43,7 +37,6 @@ impl IntoResponse for AppError {
             AppError::Timeout => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
             AppError::InvalidReply => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::InvalidParameter(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::NotConnected => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
         };
 
         (status, Json(json!({ "error": message }))).into_response()
