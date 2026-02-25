@@ -493,5 +493,8 @@ async fn factory_reset(
         })
     })
     .await?;
+    // Factory reset turns verbose off (spec: "No reply, Verbose will go off").
+    // Disconnect so the next request reconnects and re-enables verbose.
+    state.disconnect().await;
     Ok(Json(OkResponse { ok: true }))
 }
