@@ -56,27 +56,9 @@ fn escape(byte: u8, buf: &mut Vec<u8>) {
     }
 }
 
-/// Build a write command frame.
-/// value: None = no value byte (used for toggles), Some(v) = include value
-pub fn build_write(variable: u8, value: Option<u8>) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(8);
-    buf.push(STX);
-    escape(CMD_WRITE, &mut buf);
-    escape(variable, &mut buf);
-    if let Some(v) = value {
-        escape(v, &mut buf);
-    }
-    buf.push(DLE);
-    buf.push(ETX);
-    buf
-}
-
-/// Build a read command frame.
-pub fn build_read(variable: u8) -> Vec<u8> {
-    build_write_with_cmd(CMD_READ, variable, Some(0x00))
-}
-
-fn build_write_with_cmd(cmd: u8, variable: u8, value: Option<u8>) -> Vec<u8> {
+/// Build a command frame: `<STX> <cmd> <variable> [<value>] <DLE> <ETX>`.
+/// All bytes are DLE-escaped as required by the protocol.
+pub fn build_frame(cmd: u8, variable: u8, value: Option<u8>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(8);
     buf.push(STX);
     escape(cmd, &mut buf);
@@ -87,6 +69,17 @@ fn build_write_with_cmd(cmd: u8, variable: u8, value: Option<u8>) -> Vec<u8> {
     buf.push(DLE);
     buf.push(ETX);
     buf
+}
+
+/// Build a write (CMD_WRITE) frame.
+pub fn build_write(variable: u8, value: Option<u8>) -> Vec<u8> {
+    build_frame(CMD_WRITE, variable, value)
+}
+
+/// Build a read (CMD_READ) frame. Sends 0x00 as value, which per protocol
+/// replies with the current value when verbose mode is active.
+pub fn build_read(variable: u8) -> Vec<u8> {
+    build_frame(CMD_READ, variable, Some(0x00))
 }
 
 /// Parsed reply from the I22.
