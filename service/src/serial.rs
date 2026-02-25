@@ -2,7 +2,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tokio_serial::SerialPortBuilderExt;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::error::{AppError, ApiResult};
 use crate::protocol::{self, Reply, var, direct, build_write, build_read, build_frame, CMD_READ};
@@ -28,21 +28,23 @@ impl SerialConnection {
 
     /// Send a raw frame and read back one reply frame.
     pub async fn send_recv(&mut self, frame: &[u8]) -> ApiResult<Reply> {
-        debug!("TX: {:02X?}", frame);
+        trace!("TX: {:02X?}", frame);
         self.port.write_all(frame).await?;
 
         let reply_bytes = timeout(self.timeout, self.read_frame())
             .await
             .map_err(|_| AppError::Timeout)??;
 
-        debug!("RX: {:02X?}", reply_bytes);
+        trace!("RX: {:02X?}", reply_bytes);
 
-        protocol::parse_reply(&reply_bytes).ok_or(AppError::InvalidReply)
+        let reply = protocol::parse_reply(&reply_bytes).ok_or(AppError::InvalidReply)?;
+        debug!("RX var=0x{:02X} values={:02X?}", reply.variable, reply.values);
+        Ok(reply)
     }
 
     /// Send a frame and discard the reply (e.g. factory reset).
     pub async fn send_only(&mut self, frame: &[u8]) -> ApiResult<()> {
-        debug!("TX (no reply): {:02X?}", frame);
+        trace!("TX (no reply): {:02X?}", frame);
         self.port.write_all(frame).await?;
         Ok(())
     }
@@ -108,9 +110,16 @@ impl SerialConnection {
     pub async fn enable_verbose(&mut self) -> ApiResult<()> {
         let frame = build_write(direct(var::VERBOSE), Some(0x01));
         match self.send_recv(&frame).await {
-            Ok(_) => Ok(()),
+            Ok(reply) => {
+                debug!("Verbose mode active (confirmed 0x{:02X})", reply.value().unwrap_or(0));
+                Ok(())
+            }
             Err(AppError::Timeout) => {
-                warn!("Timeout enabling verbose - device may already be in verbose mode");
+                // Device did not reply — likely in standby or not yet ready.
+                // All state-read commands require verbose=1 to get a reply,
+                // so subsequent requests will also timeout, triggering a
+                // reconnect that will re-attempt enable_verbose.
+                warn!("Verbose enable timed out (device in standby or unresponsive)");
                 Ok(())
             }
             Err(e) => Err(e),
