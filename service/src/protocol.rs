@@ -44,7 +44,7 @@ pub mod var {
 }
 
 /// Direct-mode variables use var | 0x80
-pub fn direct(var: u8) -> u8 {
+pub const fn direct(var: u8) -> u8 {
     var | 0x80
 }
 

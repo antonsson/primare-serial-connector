@@ -36,11 +36,7 @@ impl AppState {
         if guard.is_none() {
             info!("Connecting to serial port {}...", self.config.port);
             match SerialConnection::open(&self.config.port, self.config.baud, self.config.timeout_ms) {
-                Ok(mut serial) => {
-                    // Enable verbose mode so commands return state
-                    if let Err(e) = serial.enable_verbose().await {
-                        warn!("Failed to enable verbose mode: {}", e);
-                    }
+                Ok(serial) => {
                     info!("Serial connection established");
                     *guard = Some(serial);
                 }

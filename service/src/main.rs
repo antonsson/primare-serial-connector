@@ -1,4 +1,5 @@
 mod error;
+mod commands;
 mod protocol;
 mod serial;
 mod api;

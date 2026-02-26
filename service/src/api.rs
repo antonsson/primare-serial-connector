@@ -7,6 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::error::{ApiResult, AppError};
 use crate::protocol::ir_remote;
@@ -114,6 +115,7 @@ pub struct StatusResponse {
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<StatusResponse>> {
+    info!("HTTP GET /status");
     let status = with_serial(&state, |s| {
         Box::pin(async move {
             Ok(StatusResponse {
@@ -143,6 +145,7 @@ pub struct PowerRequest {
 }
 
 async fn get_power(State(state): State<Arc<AppState>>) -> ApiResult<Json<PowerResponse>> {
+    info!("HTTP GET /power");
     let power = with_serial(&state, |s| Box::pin(async move { s.get_power().await })).await?;
     Ok(Json(PowerResponse { power }))
 }
@@ -151,6 +154,13 @@ async fn set_power(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PowerRequest>,
 ) -> ApiResult<Json<PowerResponse>> {
+    let state_name = match body.state {
+        PowerState::On => "on",
+        PowerState::Off => "off",
+        PowerState::Toggle => "toggle",
+    };
+    info!("HTTP POST /power state={}", state_name);
+
     let power = with_serial(&state, |s| {
         Box::pin(async move {
             match body.state {
