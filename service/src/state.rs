@@ -18,7 +18,11 @@ pub struct AppState {
 impl AppState {
     pub fn new(port: String, baud: u32, timeout_ms: u64) -> Self {
         Self {
-            config: SerialConfig { port, baud, timeout_ms },
+            config: SerialConfig {
+                port,
+                baud,
+                timeout_ms,
+            },
             connection: Mutex::new(None),
         }
     }
@@ -33,9 +37,18 @@ impl AppState {
     pub async fn get_serial(&self) -> ApiResult<SerialGuard<'_>> {
         let mut guard = self.connection.lock().await;
 
+        if guard.as_ref().is_some_and(|c| c.is_dead()) {
+            warn!("Serial connection is dead, reconnecting");
+            *guard = None;
+        }
+
         if guard.is_none() {
             info!("Connecting to serial port {}...", self.config.port);
-            match SerialConnection::open(&self.config.port, self.config.baud, self.config.timeout_ms) {
+            match SerialConnection::open(
+                &self.config.port,
+                self.config.baud,
+                self.config.timeout_ms,
+            ) {
                 Ok(serial) => {
                     info!("Serial connection established");
                     *guard = Some(serial);
@@ -67,12 +80,16 @@ impl<'a> std::ops::Deref for SerialGuard<'a> {
     type Target = SerialConnection;
 
     fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("SerialGuard created without connection")
+        self.0
+            .as_ref()
+            .expect("SerialGuard created without connection")
     }
 }
 
 impl<'a> std::ops::DerefMut for SerialGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().expect("SerialGuard created without connection")
+        self.0
+            .as_mut()
+            .expect("SerialGuard created without connection")
     }
 }

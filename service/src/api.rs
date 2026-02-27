@@ -1,17 +1,14 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::error::{ApiResult, AppError};
 use crate::protocol::ir_remote;
-use crate::serial::SerialConnection;
 use crate::state::AppState;
 
 // ---- Type-safe enums for API requests ----
@@ -49,39 +46,22 @@ pub enum IrSource {
     Back,
 }
 
-async fn with_serial<T>(
-    state: &Arc<AppState>,
-    op: impl for<'a> FnOnce(&'a mut SerialConnection) -> Pin<Box<dyn Future<Output = ApiResult<T>> + Send + 'a>>,
-) -> ApiResult<T> {
-    let mut serial = state.get_serial().await?;
-    let result = op(&mut serial).await;
-
-    if let Err(err) = &result {
-        if err.should_disconnect() {
-            drop(serial);
-            state.disconnect().await;
-        }
-    }
-
-    result
-}
-
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/health",          get(health_check))
-        .route("/status",          get(get_status))
-        .route("/power",           get(get_power).post(set_power))
-        .route("/volume",          get(get_volume).post(set_volume))
-        .route("/input",           get(get_input).post(set_input))
-        .route("/mute",            get(get_mute).post(set_mute))
-        .route("/balance",         get(get_balance).post(set_balance))
-        .route("/dim",             get(get_dim).post(set_dim))
-        .route("/menu",            post(menu_action))
-        .route("/ir_input",        get(get_ir_input).post(set_ir_input))
-        .route("/info",            get(get_info))
-        .route("/input/current/name",      get(get_current_input_name))
-        .route("/input/:id/name",  get(get_input_name))
-        .route("/factory_reset",   post(factory_reset))
+        .route("/health", get(health_check))
+        .route("/status", get(get_status))
+        .route("/power", get(get_power).post(set_power))
+        .route("/volume", get(get_volume).post(set_volume))
+        .route("/input", get(get_input).post(set_input))
+        .route("/mute", get(get_mute).post(set_mute))
+        .route("/balance", get(get_balance).post(set_balance))
+        .route("/dim", get(get_dim).post(set_dim))
+        .route("/menu", post(menu_action))
+        .route("/ir_input", get(get_ir_input).post(set_ir_input))
+        .route("/info", get(get_info))
+        .route("/input/current/name", get(get_current_input_name))
+        .route("/input/:id/name", get(get_input_name))
+        .route("/factory_reset", post(factory_reset))
 }
 
 // ---- Health ----
@@ -116,20 +96,15 @@ pub struct StatusResponse {
 
 async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<StatusResponse>> {
     info!("HTTP GET /status");
-    let status = with_serial(&state, |s| {
-        Box::pin(async move {
-            Ok(StatusResponse {
-                power: s.get_power().await?,
-                volume: s.get_volume().await?,
-                input: s.get_input().await?,
-                mute: s.get_mute().await?,
-                balance: s.get_balance().await?,
-                dim: s.get_dim().await?,
-            })
-        })
-    })
-    .await?;
-    Ok(Json(status))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(StatusResponse {
+        power: conn.get_power().await?,
+        volume: conn.get_volume().await?,
+        input: conn.get_input().await?,
+        mute: conn.get_mute().await?,
+        balance: conn.get_balance().await?,
+        dim: conn.get_dim().await?,
+    }))
 }
 
 // ---- Power ----
@@ -146,8 +121,10 @@ pub struct PowerRequest {
 
 async fn get_power(State(state): State<Arc<AppState>>) -> ApiResult<Json<PowerResponse>> {
     info!("HTTP GET /power");
-    let power = with_serial(&state, |s| Box::pin(async move { s.get_power().await })).await?;
-    Ok(Json(PowerResponse { power }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(PowerResponse {
+        power: conn.get_power().await?,
+    }))
 }
 
 async fn set_power(
@@ -160,17 +137,12 @@ async fn set_power(
         PowerState::Toggle => "toggle",
     };
     info!("HTTP POST /power state={}", state_name);
-
-    let power = with_serial(&state, |s| {
-        Box::pin(async move {
-            match body.state {
-                PowerState::On => s.set_power(true).await,
-                PowerState::Off => s.set_power(false).await,
-                PowerState::Toggle => s.toggle_power().await,
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let power = match body.state {
+        PowerState::On => conn.set_power(true).await?,
+        PowerState::Off => conn.set_power(false).await?,
+        PowerState::Toggle => conn.toggle_power().await?,
+    };
     Ok(Json(PowerResponse { power }))
 }
 
@@ -190,26 +162,26 @@ pub struct VolumeRequest {
 }
 
 async fn get_volume(State(state): State<Arc<AppState>>) -> ApiResult<Json<VolumeResponse>> {
-    let volume = with_serial(&state, |s| Box::pin(async move { s.get_volume().await })).await?;
-    Ok(Json(VolumeResponse { volume }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(VolumeResponse {
+        volume: conn.get_volume().await?,
+    }))
 }
 
 async fn set_volume(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<VolumeResponse>> {
-    let volume = with_serial(&state, |s| {
-        Box::pin(async move {
-            match (body.level, body.step) {
-                (Some(level), _) => s.set_volume(level).await,
-                (_, Some(step)) => s.step_volume(step > 0).await,
-                _ => Err(AppError::InvalidParameter(
-                    "Provide either 'level' (0-79) or 'step' (+1/-1)".into(),
-                )),
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let volume = match (body.level, body.step) {
+        (Some(level), _) => conn.set_volume(level).await?,
+        (_, Some(step)) => conn.step_volume(step > 0).await?,
+        _ => {
+            return Err(AppError::InvalidParameter(
+                "Provide either 'level' (0-79) or 'step' (+1/-1)".into(),
+            ))
+        }
+    };
     Ok(Json(VolumeResponse { volume }))
 }
 
@@ -228,27 +200,27 @@ pub struct InputRequest {
 }
 
 async fn get_input(State(state): State<Arc<AppState>>) -> ApiResult<Json<InputResponse>> {
-    let input = with_serial(&state, |s| Box::pin(async move { s.get_input().await })).await?;
-    Ok(Json(InputResponse { input }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(InputResponse {
+        input: conn.get_input().await?,
+    }))
 }
 
 async fn set_input(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InputRequest>,
 ) -> ApiResult<Json<InputResponse>> {
-    let input = with_serial(&state, |s| {
-        Box::pin(async move {
-            match (body.input, body.step) {
-                (Some(i), _) => s.set_input(i).await,
-                (_, Some(Direction::Up)) => s.step_input(true).await,
-                (_, Some(Direction::Down)) => s.step_input(false).await,
-                _ => Err(AppError::InvalidParameter(
-                    "Provide either 'input' (1-7) or 'step' (up/down)".into(),
-                )),
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let input = match (body.input, body.step) {
+        (Some(i), _) => conn.set_input(i).await?,
+        (_, Some(Direction::Up)) => conn.step_input(true).await?,
+        (_, Some(Direction::Down)) => conn.step_input(false).await?,
+        _ => {
+            return Err(AppError::InvalidParameter(
+                "Provide either 'input' (1-7) or 'step' (up/down)".into(),
+            ))
+        }
+    };
     Ok(Json(InputResponse { input }))
 }
 
@@ -266,23 +238,21 @@ pub struct MuteRequest {
 }
 
 async fn get_mute(State(state): State<Arc<AppState>>) -> ApiResult<Json<MuteResponse>> {
-    let mute = with_serial(&state, |s| Box::pin(async move { s.get_mute().await })).await?;
-    Ok(Json(MuteResponse { mute }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(MuteResponse {
+        mute: conn.get_mute().await?,
+    }))
 }
 
 async fn set_mute(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MuteRequest>,
 ) -> ApiResult<Json<MuteResponse>> {
-    let mute = with_serial(&state, |s| {
-        Box::pin(async move {
-            match body.state {
-                Some(v) => s.set_mute(v).await,
-                None => s.toggle_mute().await,
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let mute = match body.state {
+        Some(v) => conn.set_mute(v).await?,
+        None => conn.toggle_mute().await?,
+    };
     Ok(Json(MuteResponse { mute }))
 }
 
@@ -302,26 +272,26 @@ pub struct BalanceRequest {
 }
 
 async fn get_balance(State(state): State<Arc<AppState>>) -> ApiResult<Json<BalanceResponse>> {
-    let balance = with_serial(&state, |s| Box::pin(async move { s.get_balance().await })).await?;
-    Ok(Json(BalanceResponse { balance }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(BalanceResponse {
+        balance: conn.get_balance().await?,
+    }))
 }
 
 async fn set_balance(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BalanceRequest>,
 ) -> ApiResult<Json<BalanceResponse>> {
-    let balance = with_serial(&state, |s| {
-        Box::pin(async move {
-            match (body.value, body.step) {
-                (Some(v), _) => s.set_balance(v).await,
-                (_, Some(step)) => s.step_balance(step).await,
-                _ => Err(AppError::InvalidParameter(
-                    "Provide either 'value' (-9..9) or 'step'".into(),
-                )),
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let balance = match (body.value, body.step) {
+        (Some(v), _) => conn.set_balance(v).await?,
+        (_, Some(step)) => conn.step_balance(step).await?,
+        _ => {
+            return Err(AppError::InvalidParameter(
+                "Provide either 'value' (-9..9) or 'step'".into(),
+            ))
+        }
+    };
     Ok(Json(BalanceResponse { balance }))
 }
 
@@ -343,26 +313,26 @@ pub struct DimRequest {
 }
 
 async fn get_dim(State(state): State<Arc<AppState>>) -> ApiResult<Json<DimResponse>> {
-    let dim = with_serial(&state, |s| Box::pin(async move { s.get_dim().await })).await?;
-    Ok(Json(DimResponse { dim }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(DimResponse {
+        dim: conn.get_dim().await?,
+    }))
 }
 
 async fn set_dim(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DimRequest>,
 ) -> ApiResult<Json<DimResponse>> {
-    let dim = with_serial(&state, |s| {
-        Box::pin(async move {
-            match (body.level, body.step) {
-                (Some(l), _) => s.set_dim(l).await,
-                (None, true) => s.step_dim().await,
-                _ => Err(AppError::InvalidParameter(
-                    "Provide either 'level' (0-3) or 'step': true".into(),
-                )),
-            }
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    let dim = match (body.level, body.step) {
+        (Some(l), _) => conn.set_dim(l).await?,
+        (None, true) => conn.step_dim().await?,
+        _ => {
+            return Err(AppError::InvalidParameter(
+                "Provide either 'level' (0-3) or 'step': true".into(),
+            ))
+        }
+    };
     Ok(Json(DimResponse { dim }))
 }
 
@@ -382,25 +352,24 @@ async fn menu_action(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MenuRequest>,
 ) -> ApiResult<Json<OkResponse>> {
-    with_serial(&state, |s| {
-        Box::pin(async move {
-            match body.action {
-                MenuAction::Enter => s.menu_enter().await?,
-                MenuAction::Exit => s.menu_exit().await?,
-                MenuAction::Up => s.menu_nav(ir_remote::STEP_UP).await?,
-                MenuAction::Down => s.menu_nav(ir_remote::STEP_DOWN).await?,
-                MenuAction::Right => s.menu_nav(ir_remote::ARROW_RIGHT).await?,
-                MenuAction::Left => s.menu_nav(ir_remote::ARROW_LEFT).await?,
-            }
-            Ok(())
-        })
-    })
-    .await?;
+    let mut conn = state.get_serial().await?;
+    match body.action {
+        MenuAction::Enter => conn.menu_enter().await?,
+        MenuAction::Exit => conn.menu_exit().await?,
+        MenuAction::Up => conn.menu_nav(ir_remote::STEP_UP).await?,
+        MenuAction::Down => conn.menu_nav(ir_remote::STEP_DOWN).await?,
+        MenuAction::Right => conn.menu_nav(ir_remote::ARROW_RIGHT).await?,
+        MenuAction::Left => conn.menu_nav(ir_remote::ARROW_LEFT).await?,
+    }
     Ok(Json(OkResponse { ok: true }))
 }
 
 fn ir_source_str(back: bool) -> &'static str {
-    if back { "back" } else { "front" }
+    if back {
+        "back"
+    } else {
+        "front"
+    }
 }
 
 // ---- IR Input ----
@@ -417,24 +386,24 @@ pub struct IrInputRequest {
 }
 
 async fn get_ir_input(State(state): State<Arc<AppState>>) -> ApiResult<Json<IrInputResponse>> {
-    let back = with_serial(&state, |s| Box::pin(async move { s.get_ir_input().await })).await?;
-    Ok(Json(IrInputResponse { source: ir_source_str(back).into() }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(IrInputResponse {
+        source: ir_source_str(conn.get_ir_input().await?).into(),
+    }))
 }
 
 async fn set_ir_input(
     State(state): State<Arc<AppState>>,
     Json(body): Json<IrInputRequest>,
 ) -> ApiResult<Json<IrInputResponse>> {
-    let back = with_serial(&state, |s| {
-        Box::pin(async move {
-            match body.source {
-                IrSource::Back => s.set_ir_input(true).await,
-                IrSource::Front => s.set_ir_input(false).await,
-            }
-        })
-    })
-    .await?;
-    Ok(Json(IrInputResponse { source: ir_source_str(back).into() }))
+    let mut conn = state.get_serial().await?;
+    let back = match body.source {
+        IrSource::Back => conn.set_ir_input(true).await?,
+        IrSource::Front => conn.set_ir_input(false).await?,
+    };
+    Ok(Json(IrInputResponse {
+        source: ir_source_str(back).into(),
+    }))
 }
 
 // ---- Info ----
@@ -447,17 +416,12 @@ pub struct InfoResponse {
 }
 
 async fn get_info(State(state): State<Arc<AppState>>) -> ApiResult<Json<InfoResponse>> {
-    let info = with_serial(&state, |s| {
-        Box::pin(async move {
-            Ok(InfoResponse {
-                product_line: s.get_product_line().await?,
-                model: s.get_model_name().await?,
-                firmware: s.get_version().await?,
-            })
-        })
-    })
-    .await?;
-    Ok(Json(info))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(InfoResponse {
+        product_line: conn.get_product_line().await?,
+        model: conn.get_model_name().await?,
+        firmware: conn.get_version().await?,
+    }))
 }
 
 // ---- Input names ----
@@ -467,17 +431,23 @@ pub struct InputNameResponse {
     pub name: String,
 }
 
-async fn get_current_input_name(State(state): State<Arc<AppState>>) -> ApiResult<Json<InputNameResponse>> {
-    let name = with_serial(&state, |s| Box::pin(async move { s.get_input_name_current().await })).await?;
-    Ok(Json(InputNameResponse { name }))
+async fn get_current_input_name(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<InputNameResponse>> {
+    let mut conn = state.get_serial().await?;
+    Ok(Json(InputNameResponse {
+        name: conn.get_input_name_current().await?,
+    }))
 }
 
 async fn get_input_name(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u8>,
 ) -> ApiResult<Json<InputNameResponse>> {
-    let name = with_serial(&state, |s| Box::pin(async move { s.get_input_name(id).await })).await?;
-    Ok(Json(InputNameResponse { name }))
+    let mut conn = state.get_serial().await?;
+    Ok(Json(InputNameResponse {
+        name: conn.get_input_name(id).await?,
+    }))
 }
 
 // ---- Factory reset ----
@@ -493,18 +463,13 @@ async fn factory_reset(
 ) -> ApiResult<Json<OkResponse>> {
     if !body.confirm {
         return Err(AppError::InvalidParameter(
-            "Set 'confirm': true to proceed with factory reset".into()
+            "Set 'confirm': true to proceed with factory reset".into(),
         ));
     }
-    with_serial(&state, |s| {
-        Box::pin(async move {
-            s.factory_reset().await?;
-            Ok(())
-        })
-    })
-    .await?;
-    // Factory reset turns verbose off (spec: "No reply, Verbose will go off").
-    // Disconnect so the next request reconnects and re-enables verbose.
+    let mut conn = state.get_serial().await?;
+    conn.factory_reset().await?;
+    drop(conn); // release mutex before disconnect
+                // Always disconnect: verbose goes off after reset (spec), reconnect re-enables it.
     state.disconnect().await;
     Ok(Json(OkResponse { ok: true }))
 }

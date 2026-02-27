@@ -1,13 +1,13 @@
-mod error;
+mod api;
 mod commands;
+mod error;
 mod protocol;
 mod serial;
-mod api;
 mod state;
 
-use std::sync::Arc;
 use axum::Router;
 use clap::Parser;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;

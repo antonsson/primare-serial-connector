@@ -5,18 +5,19 @@ use tokio_serial::SerialPortBuilderExt;
 use tracing::{debug, trace, warn};
 
 use crate::commands::{
-    CommandSpec, FACTORY_RESET, GET_BALANCE, GET_DIM, GET_INPUT, GET_INPUT_NAME_BY_ID,
-    GET_INPUT_NAME_CURRENT, GET_IR_INPUT, GET_MODEL_NAME, GET_MUTE, GET_POWER, GET_PRODUCT_LINE,
-    GET_VERSION, GET_VOLUME, MENU_ENTER, MENU_EXIT, MENU_NAV, SET_BALANCE, SET_DIM, SET_INPUT,
-    SET_IR_INPUT, SET_MUTE, SET_POWER_OFF, SET_POWER_ON, SET_VOLUME, STEP_BALANCE, STEP_DIM,
-    STEP_INPUT, STEP_VOLUME, TOGGLE_MUTE, TOGGLE_POWER, VERBOSE_OFF, VERBOSE_ON,
+    CommandSpec, BALANCE_GET, BALANCE_SET, BALANCE_STEP, DIM_GET, DIM_SET, DIM_STEP, FACTORY_RESET,
+    INPUT_GET, INPUT_NAME_BY_ID_READ, INPUT_NAME_READ, INPUT_SET, INPUT_STEP, IR_INPUT_GET,
+    IR_INPUT_SET, MENU_ENTER, MENU_EXIT, MENU_NAV, MODEL_NAME_READ, MUTE_GET, MUTE_SET,
+    MUTE_TOGGLE, POWER_GET, POWER_OFF, POWER_ON, POWER_TOGGLE, PRODUCT_LINE_READ, VERBOSE_OFF,
+    VERBOSE_ON, VERSION_READ, VOLUME_GET, VOLUME_SET, VOLUME_STEP,
 };
-use crate::error::{AppError, ApiResult};
+use crate::error::{ApiResult, AppError};
 use crate::protocol::{self, Reply};
 
 pub struct SerialConnection {
     port: tokio_serial::SerialStream,
     timeout: Duration,
+    dead: bool,
 }
 
 impl SerialConnection {
@@ -30,29 +31,49 @@ impl SerialConnection {
         Ok(Self {
             port,
             timeout: Duration::from_millis(timeout_ms),
+            dead: false,
         })
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.dead
     }
 
     /// Send a raw frame and read back one reply frame.
     pub async fn send_recv(&mut self, frame: &[u8]) -> ApiResult<Reply> {
         trace!("TX: {:02X?}", frame);
-        self.port.write_all(frame).await?;
 
-        let reply_bytes = timeout(self.timeout, self.read_frame())
-            .await
-            .map_err(|_| AppError::Timeout)??;
+        if let Err(e) = self.port.write_all(frame).await {
+            self.dead = true;
+            return Err(e.into());
+        }
+
+        let reply_bytes = match timeout(self.timeout, self.read_frame()).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                self.dead = true;
+                return Err(e);
+            }
+            Err(_) => return Err(AppError::Timeout),
+        };
 
         trace!("RX: {:02X?}", reply_bytes);
 
         let reply = protocol::parse_reply(&reply_bytes).ok_or(AppError::InvalidReply)?;
-        debug!("RX var=0x{:02X} values={:02X?}", reply.variable, reply.values);
+        debug!(
+            "RX var=0x{:02X} values={:02X?}",
+            reply.variable, reply.values
+        );
         Ok(reply)
     }
 
     /// Send a frame and discard the reply (e.g. factory reset).
     pub async fn send_only(&mut self, frame: &[u8]) -> ApiResult<()> {
         trace!("TX (no reply): {:02X?}", frame);
-        self.port.write_all(frame).await?;
+        if let Err(e) = self.port.write_all(frame).await {
+            self.dead = true;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -86,7 +107,11 @@ impl SerialConnection {
     /// Encode the step direction as the relative value the protocol expects:
     /// up = 0x01 (increase by 1), down = 0xFF (-1 as u8).
     fn step_byte(up: bool) -> u8 {
-        if up { 0x01 } else { 0xFF }
+        if up {
+            0x01
+        } else {
+            0xFF
+        }
     }
 
     async fn send_command(&mut self, command: CommandSpec) -> ApiResult<Reply> {
@@ -123,7 +148,10 @@ impl SerialConnection {
     pub async fn enable_verbose(&mut self) -> ApiResult<()> {
         match self.send_command(VERBOSE_ON).await {
             Ok(reply) => {
-                debug!("Verbose mode active (confirmed 0x{:02X})", reply.value().unwrap_or(0));
+                debug!(
+                    "Verbose mode active (confirmed 0x{:02X})",
+                    reply.value().unwrap_or(0)
+                );
                 Ok(())
             }
             Err(AppError::Timeout) => {
@@ -149,7 +177,7 @@ impl SerialConnection {
 
     pub async fn get_power(&mut self) -> ApiResult<bool> {
         // Standby var: 0x00 = standby (off), 0x01 = operate (on)
-        match self.read_value(GET_POWER).await {
+        match self.read_value(POWER_GET).await {
             Ok(v) => Ok(v == 0x01),
             Err(AppError::Timeout) => Ok(false),
             Err(e) => Err(e),
@@ -160,65 +188,69 @@ impl SerialConnection {
         // Power set should be sent with verbose disabled.
         self.disable_verbose().await?;
         let reply = self
-            .send_command(if on { SET_POWER_ON } else { SET_POWER_OFF })
+            .send_command(if on { POWER_ON } else { POWER_OFF })
             .await?;
         Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
     }
 
     pub async fn toggle_power(&mut self) -> ApiResult<bool> {
-        let reply = self.send_command(TOGGLE_POWER).await?;
+        let reply = self.send_command(POWER_TOGGLE).await?;
         Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
     }
 
     // --- Volume ---
 
     pub async fn get_volume(&mut self) -> ApiResult<u8> {
-        self.read_value(GET_VOLUME).await
+        self.read_value(VOLUME_GET).await
     }
 
     pub async fn set_volume(&mut self, level: u8) -> ApiResult<u8> {
         if level > 79 {
             return Err(AppError::InvalidParameter("Volume must be 0-79".into()));
         }
-        self.write_value(SET_VOLUME, level).await
+        self.write_value(VOLUME_SET, level).await
     }
 
     pub async fn step_volume(&mut self, up: bool) -> ApiResult<u8> {
-        let reply = self.send_command_value(STEP_VOLUME, Self::step_byte(up)).await?;
+        let reply = self
+            .send_command_value(VOLUME_STEP, Self::step_byte(up))
+            .await?;
         reply.value().ok_or(AppError::InvalidReply)
     }
 
     // --- Input ---
 
     pub async fn get_input(&mut self) -> ApiResult<u8> {
-        self.read_value(GET_INPUT).await
+        self.read_value(INPUT_GET).await
     }
 
     pub async fn set_input(&mut self, input: u8) -> ApiResult<u8> {
         if !(1..=7).contains(&input) {
             return Err(AppError::InvalidParameter("Input must be 1-7".into()));
         }
-        self.write_value(SET_INPUT, input).await
+        self.write_value(INPUT_SET, input).await
     }
 
     pub async fn step_input(&mut self, up: bool) -> ApiResult<u8> {
-        let reply = self.send_command_value(STEP_INPUT, Self::step_byte(up)).await?;
+        let reply = self
+            .send_command_value(INPUT_STEP, Self::step_byte(up))
+            .await?;
         reply.value().ok_or(AppError::InvalidReply)
     }
 
     // --- Mute ---
 
     pub async fn get_mute(&mut self) -> ApiResult<bool> {
-        Ok(self.read_value(GET_MUTE).await? == 0x01)
+        Ok(self.read_value(MUTE_GET).await? == 0x01)
     }
 
     pub async fn set_mute(&mut self, muted: bool) -> ApiResult<bool> {
         let value = if muted { 0x01 } else { 0x00 };
-        Ok(self.write_value(SET_MUTE, value).await? == 0x01)
+        Ok(self.write_value(MUTE_SET, value).await? == 0x01)
     }
 
     pub async fn toggle_mute(&mut self) -> ApiResult<bool> {
-        let reply = self.send_command(TOGGLE_MUTE).await?;
+        let reply = self.send_command(MUTE_TOGGLE).await?;
         Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
     }
 
@@ -226,36 +258,36 @@ impl SerialConnection {
 
     /// Returns balance as i8 (-9 to +9).
     pub async fn get_balance(&mut self) -> ApiResult<i8> {
-        Ok(self.read_value(GET_BALANCE).await? as i8)
+        Ok(self.read_value(BALANCE_GET).await? as i8)
     }
 
     pub async fn set_balance(&mut self, value: i8) -> ApiResult<i8> {
         if !(-9..=9).contains(&value) {
             return Err(AppError::InvalidParameter("Balance must be -9 to 9".into()));
         }
-        Ok(self.write_value(SET_BALANCE, value as u8).await? as i8)
+        Ok(self.write_value(BALANCE_SET, value as u8).await? as i8)
     }
 
     pub async fn step_balance(&mut self, steps: i8) -> ApiResult<i8> {
-        let reply = self.send_command_value(STEP_BALANCE, steps as u8).await?;
+        let reply = self.send_command_value(BALANCE_STEP, steps as u8).await?;
         Ok(reply.value().ok_or(AppError::InvalidReply)? as i8)
     }
 
     // --- Dim ---
 
     pub async fn get_dim(&mut self) -> ApiResult<u8> {
-        self.read_value(GET_DIM).await
+        self.read_value(DIM_GET).await
     }
 
     pub async fn set_dim(&mut self, level: u8) -> ApiResult<u8> {
         if level > 3 {
             return Err(AppError::InvalidParameter("Dim level must be 0-3".into()));
         }
-        self.write_value(SET_DIM, level).await
+        self.write_value(DIM_SET, level).await
     }
 
     pub async fn step_dim(&mut self) -> ApiResult<u8> {
-        let reply = self.send_command(STEP_DIM).await?;
+        let reply = self.send_command(DIM_STEP).await?;
         reply.value().ok_or(AppError::InvalidReply)
     }
 
@@ -280,37 +312,39 @@ impl SerialConnection {
 
     pub async fn get_ir_input(&mut self) -> ApiResult<bool> {
         // 0x00 = front, any other = back
-        Ok(self.read_value(GET_IR_INPUT).await? != 0x00)
+        Ok(self.read_value(IR_INPUT_GET).await? != 0x00)
     }
 
     pub async fn set_ir_input(&mut self, back: bool) -> ApiResult<bool> {
         let value = if back { 0x01 } else { 0x00 };
-        Ok(self.write_value(SET_IR_INPUT, value).await? != 0x00)
+        Ok(self.write_value(IR_INPUT_SET, value).await? != 0x00)
     }
 
     // --- Info ---
 
     pub async fn get_product_line(&mut self) -> ApiResult<String> {
-        self.read_text(GET_PRODUCT_LINE).await
+        self.read_text(PRODUCT_LINE_READ).await
     }
 
     pub async fn get_model_name(&mut self) -> ApiResult<String> {
-        self.read_text(GET_MODEL_NAME).await
+        self.read_text(MODEL_NAME_READ).await
     }
 
     pub async fn get_version(&mut self) -> ApiResult<String> {
-        self.read_text(GET_VERSION).await
+        self.read_text(VERSION_READ).await
     }
 
     pub async fn get_input_name_current(&mut self) -> ApiResult<String> {
-        self.read_text(GET_INPUT_NAME_CURRENT).await
+        self.read_text(INPUT_NAME_READ).await
     }
 
     pub async fn get_input_name(&mut self, input: u8) -> ApiResult<String> {
         if !(1..=7).contains(&input) {
             return Err(AppError::InvalidParameter("Input must be 1-7".into()));
         }
-        let reply = self.send_command_value(GET_INPUT_NAME_BY_ID, input).await?;
+        let reply = self
+            .send_command_value(INPUT_NAME_BY_ID_READ, input)
+            .await?;
         Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
     }
 

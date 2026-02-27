@@ -22,12 +22,6 @@ pub enum AppError {
     InvalidParameter(String),
 }
 
-impl AppError {
-    pub fn should_disconnect(&self) -> bool {
-        matches!(self, AppError::Serial(_) | AppError::Io(_) | AppError::Timeout | AppError::InvalidReply)
-    }
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
