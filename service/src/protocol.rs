@@ -39,7 +39,6 @@ pub mod var {
     pub const MUTE_DIRECT: u8 = 0x89;
     pub const DIM: u8 = 0x0A;
     pub const DIM_DIRECT: u8 = 0x8A;
-    pub const VERBOSE: u8 = 0x0D;
     pub const VERBOSE_DIRECT: u8 = 0x8D;
     pub const MENU: u8 = 0x0E;
     pub const MENU_DIRECT: u8 = 0x8E;

@@ -49,8 +49,12 @@ impl AppState {
                 self.config.baud,
                 self.config.timeout_ms,
             ) {
-                Ok(serial) => {
+                Ok(mut serial) => {
                     info!("Serial connection established");
+                    // Enable verbose mode once on connect so all commands return state
+                    if let Err(e) = serial.enable_verbose().await {
+                        warn!("Failed to enable verbose mode: {}", e);
+                    }
                     *guard = Some(serial);
                 }
                 Err(e) => {

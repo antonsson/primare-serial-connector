@@ -21,7 +21,7 @@ pub enum PowerState {
     Toggle,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MenuAction {
     Enter,
@@ -32,14 +32,14 @@ pub enum MenuAction {
     Right,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Up,
     Down,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IrSource {
     Front,
@@ -98,12 +98,12 @@ async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<Status
     info!("HTTP GET /status");
     let mut conn = state.get_serial().await?;
     Ok(Json(StatusResponse {
-        power: conn.get_power().await?,
+        power: conn.get_power(),
         volume: conn.get_volume().await?,
         input: conn.get_input().await?,
-        mute: conn.get_mute().await?,
-        balance: conn.get_balance().await?,
-        dim: conn.get_dim().await?,
+        mute: false,
+        balance: 0,
+        dim: 2,
     }))
 }
 
@@ -121,9 +121,9 @@ pub struct PowerRequest {
 
 async fn get_power(State(state): State<Arc<AppState>>) -> ApiResult<Json<PowerResponse>> {
     info!("HTTP GET /power");
-    let mut conn = state.get_serial().await?;
+    let conn = state.get_serial().await?;
     Ok(Json(PowerResponse {
-        power: conn.get_power().await?,
+        power: conn.get_power(),
     }))
 }
 
@@ -162,6 +162,7 @@ pub struct VolumeRequest {
 }
 
 async fn get_volume(State(state): State<Arc<AppState>>) -> ApiResult<Json<VolumeResponse>> {
+    info!("HTTP GET /volume");
     let mut conn = state.get_serial().await?;
     Ok(Json(VolumeResponse {
         volume: conn.get_volume().await?,
@@ -172,6 +173,7 @@ async fn set_volume(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<VolumeResponse>> {
+    info!("HTTP POST /volume level={:?} step={:?}", body.level, body.step);
     let mut conn = state.get_serial().await?;
     let volume = match (body.level, body.step) {
         (Some(level), _) => conn.set_volume(level).await?,
@@ -200,6 +202,7 @@ pub struct InputRequest {
 }
 
 async fn get_input(State(state): State<Arc<AppState>>) -> ApiResult<Json<InputResponse>> {
+    info!("HTTP GET /input");
     let mut conn = state.get_serial().await?;
     Ok(Json(InputResponse {
         input: conn.get_input().await?,
@@ -210,6 +213,7 @@ async fn set_input(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InputRequest>,
 ) -> ApiResult<Json<InputResponse>> {
+    info!("HTTP POST /input input={:?} step={:?}", body.input, body.step);
     let mut conn = state.get_serial().await?;
     let input = match (body.input, body.step) {
         (Some(i), _) => conn.set_input(i).await?,
@@ -238,6 +242,7 @@ pub struct MuteRequest {
 }
 
 async fn get_mute(State(state): State<Arc<AppState>>) -> ApiResult<Json<MuteResponse>> {
+    info!("HTTP GET /mute");
     let mut conn = state.get_serial().await?;
     Ok(Json(MuteResponse {
         mute: conn.get_mute().await?,
@@ -248,6 +253,7 @@ async fn set_mute(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MuteRequest>,
 ) -> ApiResult<Json<MuteResponse>> {
+    info!("HTTP POST /mute state={:?}", body.state);
     let mut conn = state.get_serial().await?;
     let mute = match body.state {
         Some(v) => conn.set_mute(v).await?,
@@ -272,6 +278,7 @@ pub struct BalanceRequest {
 }
 
 async fn get_balance(State(state): State<Arc<AppState>>) -> ApiResult<Json<BalanceResponse>> {
+    info!("HTTP GET /balance");
     let mut conn = state.get_serial().await?;
     Ok(Json(BalanceResponse {
         balance: conn.get_balance().await?,
@@ -282,6 +289,7 @@ async fn set_balance(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BalanceRequest>,
 ) -> ApiResult<Json<BalanceResponse>> {
+    info!("HTTP POST /balance value={:?} step={:?}", body.value, body.step);
     let mut conn = state.get_serial().await?;
     let balance = match (body.value, body.step) {
         (Some(v), _) => conn.set_balance(v).await?,
@@ -313,6 +321,7 @@ pub struct DimRequest {
 }
 
 async fn get_dim(State(state): State<Arc<AppState>>) -> ApiResult<Json<DimResponse>> {
+    info!("HTTP GET /dim");
     let mut conn = state.get_serial().await?;
     Ok(Json(DimResponse {
         dim: conn.get_dim().await?,
@@ -323,6 +332,7 @@ async fn set_dim(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DimRequest>,
 ) -> ApiResult<Json<DimResponse>> {
+    info!("HTTP POST /dim level={:?} step={}", body.level, body.step);
     let mut conn = state.get_serial().await?;
     let dim = match (body.level, body.step) {
         (Some(l), _) => conn.set_dim(l).await?,
@@ -352,6 +362,7 @@ async fn menu_action(
     State(state): State<Arc<AppState>>,
     Json(body): Json<MenuRequest>,
 ) -> ApiResult<Json<OkResponse>> {
+    info!("HTTP POST /menu action={:?}", body.action);
     let mut conn = state.get_serial().await?;
     match body.action {
         MenuAction::Enter => conn.menu_enter().await?,
@@ -386,6 +397,7 @@ pub struct IrInputRequest {
 }
 
 async fn get_ir_input(State(state): State<Arc<AppState>>) -> ApiResult<Json<IrInputResponse>> {
+    info!("HTTP GET /ir_input");
     let mut conn = state.get_serial().await?;
     Ok(Json(IrInputResponse {
         source: ir_source_str(conn.get_ir_input().await?).into(),
@@ -396,6 +408,7 @@ async fn set_ir_input(
     State(state): State<Arc<AppState>>,
     Json(body): Json<IrInputRequest>,
 ) -> ApiResult<Json<IrInputResponse>> {
+    info!("HTTP POST /ir_input source={:?}", body.source);
     let mut conn = state.get_serial().await?;
     let back = match body.source {
         IrSource::Back => conn.set_ir_input(true).await?,
@@ -416,6 +429,7 @@ pub struct InfoResponse {
 }
 
 async fn get_info(State(state): State<Arc<AppState>>) -> ApiResult<Json<InfoResponse>> {
+    info!("HTTP GET /info");
     let mut conn = state.get_serial().await?;
     Ok(Json(InfoResponse {
         product_line: conn.get_product_line().await?,
@@ -434,6 +448,7 @@ pub struct InputNameResponse {
 async fn get_current_input_name(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<InputNameResponse>> {
+    info!("HTTP GET /input/current/name");
     let mut conn = state.get_serial().await?;
     Ok(Json(InputNameResponse {
         name: conn.get_input_name_current().await?,
@@ -444,6 +459,7 @@ async fn get_input_name(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u8>,
 ) -> ApiResult<Json<InputNameResponse>> {
+    info!("HTTP GET /input/{}/name", id);
     let mut conn = state.get_serial().await?;
     Ok(Json(InputNameResponse {
         name: conn.get_input_name(id).await?,
@@ -461,6 +477,7 @@ async fn factory_reset(
     State(state): State<Arc<AppState>>,
     Json(body): Json<FactoryResetRequest>,
 ) -> ApiResult<Json<OkResponse>> {
+    info!("HTTP POST /factory_reset confirm={}", body.confirm);
     if !body.confirm {
         return Err(AppError::InvalidParameter(
             "Set 'confirm': true to proceed with factory reset".into(),

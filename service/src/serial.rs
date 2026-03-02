@@ -8,7 +8,7 @@ use crate::commands::{
     CommandSpec, BALANCE_GET, BALANCE_SET, BALANCE_STEP, DIM_GET, DIM_SET, DIM_STEP, FACTORY_RESET,
     INPUT_GET, INPUT_NAME_BY_ID_READ, INPUT_NAME_READ, INPUT_SET, INPUT_STEP, IR_INPUT_GET,
     IR_INPUT_SET, MENU_ENTER, MENU_EXIT, MENU_NAV, MODEL_NAME_READ, MUTE_GET, MUTE_SET,
-    MUTE_TOGGLE, POWER_GET, POWER_OFF, POWER_ON, POWER_TOGGLE, PRODUCT_LINE_READ, VERBOSE_OFF,
+    MUTE_TOGGLE, POWER_OFF, POWER_ON, POWER_TOGGLE, PRODUCT_LINE_READ,
     VERBOSE_ON, VERSION_READ, VOLUME_GET, VOLUME_SET, VOLUME_STEP,
 };
 use crate::error::{ApiResult, AppError};
@@ -18,6 +18,8 @@ pub struct SerialConnection {
     port: tokio_serial::SerialStream,
     timeout: Duration,
     dead: bool,
+    /// Cached power state. None = unknown (not yet determined via toggle).
+    power_state: Option<bool>,
 }
 
 impl SerialConnection {
@@ -32,6 +34,7 @@ impl SerialConnection {
             port,
             timeout: Duration::from_millis(timeout_ms),
             dead: false,
+            power_state: None,
         })
     }
 
@@ -125,22 +128,45 @@ impl SerialConnection {
     }
 
     /// Read a variable's current value via command list.
+    /// Timeout indicates the amp is likely off.
     async fn read_value(&mut self, command: CommandSpec) -> ApiResult<u8> {
-        self.enable_verbose().await?;
-        let reply = self.send_command(command).await?;
-        reply.value().ok_or(AppError::InvalidReply)
+        match self.send_command(command).await {
+            Ok(reply) => reply.value().ok_or(AppError::InvalidReply),
+            Err(AppError::Timeout) => {
+                debug!("Read timed out, assuming amp is off");
+                self.power_state = Some(false);
+                Err(AppError::Timeout)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Write a value via command list, returning the confirmed value.
+    /// Timeout indicates the amp is likely off.
     async fn write_value(&mut self, command: CommandSpec, value: u8) -> ApiResult<u8> {
-        let reply = self.send_command_value(command, value).await?;
-        reply.value().ok_or(AppError::InvalidReply)
+        match self.send_command_value(command, value).await {
+            Ok(reply) => reply.value().ok_or(AppError::InvalidReply),
+            Err(AppError::Timeout) => {
+                debug!("Write timed out, assuming amp is off");
+                self.power_state = Some(false);
+                Err(AppError::Timeout)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Read a text (ASCII) variable using CMD_READ, returning the decoded string.
+    /// Timeout indicates the amp is likely off.
     async fn read_text(&mut self, command: CommandSpec) -> ApiResult<String> {
-        let reply = self.send_command(command).await?;
-        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
+        match self.send_command(command).await {
+            Ok(reply) => Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned()),
+            Err(AppError::Timeout) => {
+                debug!("Read text timed out, assuming amp is off");
+                self.power_state = Some(false);
+                Err(AppError::Timeout)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ---- Higher-level commands ----
@@ -166,36 +192,35 @@ impl SerialConnection {
         }
     }
 
-    pub async fn disable_verbose(&mut self) -> ApiResult<()> {
-        match self.send_command(VERBOSE_OFF).await {
-            Ok(_) | Err(AppError::Timeout) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
     // --- Power ---
+    // Power state is cached from the last power operation response.
 
-    pub async fn get_power(&mut self) -> ApiResult<bool> {
-        // Standby var: 0x00 = standby (off), 0x01 = operate (on)
-        match self.read_value(POWER_GET).await {
-            Ok(v) => Ok(v == 0x01),
-            Err(AppError::Timeout) => Ok(false),
-            Err(e) => Err(e),
-        }
+    /// Returns cached power state. Returns `false` if unknown (no power operation yet).
+    pub fn get_power(&self) -> bool {
+        self.power_state.unwrap_or(false)
     }
 
     pub async fn set_power(&mut self, on: bool) -> ApiResult<bool> {
-        // Power set should be sent with verbose disabled.
-        self.disable_verbose().await?;
-        let reply = self
-            .send_command(if on { POWER_ON } else { POWER_OFF })
-            .await?;
-        Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
+        match self.send_command(if on { POWER_ON } else { POWER_OFF }).await {
+            Ok(reply) => {
+                let state = reply.value().ok_or(AppError::InvalidReply)? == 0x01;
+                self.power_state = Some(state);
+                Ok(state)
+            }
+            Err(AppError::Timeout) => {
+                // Timeout likely means device is already in the requested state
+                self.power_state = Some(on);
+                Ok(on)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn toggle_power(&mut self) -> ApiResult<bool> {
         let reply = self.send_command(POWER_TOGGLE).await?;
-        Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
+        let state = reply.value().ok_or(AppError::InvalidReply)? == 0x01;
+        self.power_state = Some(state);
+        Ok(state)
     }
 
     // --- Volume ---

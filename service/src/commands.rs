@@ -22,28 +22,15 @@ impl CommandSpec {
 }
 
 // ---- Verbose ----
-// VERBOSE_OFF uses the non-direct toggle (0x0D). The direct variant (0x8D 0x00) is
-// treated as a query when verbose is on, so it would not turn verbose off.
 pub const VERBOSE_ON: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
     variable: var::VERBOSE_DIRECT,
     default_value: Some(0x01),
 };
-pub const VERBOSE_OFF: CommandSpec = CommandSpec {
-    cmd: CMD_WRITE,
-    variable: var::VERBOSE,
-    default_value: Some(0x00),
-};
 
 // ---- Power ----
-// POWER_GET: direct 0x00 — per spec this is a query when verbose is on.
 // POWER_ON / POWER_OFF: direct set; must be sent with verbose off (set_power disables it first).
 // POWER_TOGGLE: non-direct, spec example W 0x01 0x00.
-pub const POWER_GET: CommandSpec = CommandSpec {
-    cmd: CMD_WRITE,
-    variable: var::STANDBY_DIRECT,
-    default_value: Some(0x00),
-};
 pub const POWER_ON: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
     variable: var::STANDBY_DIRECT,
@@ -63,7 +50,7 @@ pub const POWER_TOGGLE: CommandSpec = CommandSpec {
 // ---- Volume ----
 pub const VOLUME_GET: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
-    variable: var::VOLUME_DIRECT,
+    variable: var::VOLUME,
     default_value: Some(0x00),
 };
 pub const VOLUME_SET: CommandSpec = CommandSpec {
@@ -80,7 +67,7 @@ pub const VOLUME_STEP: CommandSpec = CommandSpec {
 // ---- Input ----
 pub const INPUT_GET: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
-    variable: var::INPUT_DIRECT,
+    variable: var::INPUT,
     default_value: Some(0x00),
 };
 pub const INPUT_SET: CommandSpec = CommandSpec {
@@ -97,7 +84,7 @@ pub const INPUT_STEP: CommandSpec = CommandSpec {
 // ---- Mute ----
 pub const MUTE_GET: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
-    variable: var::MUTE_DIRECT,
+    variable: var::MUTE,
     default_value: Some(0x00),
 };
 pub const MUTE_SET: CommandSpec = CommandSpec {
@@ -114,7 +101,7 @@ pub const MUTE_TOGGLE: CommandSpec = CommandSpec {
 // ---- Balance ----
 pub const BALANCE_GET: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
-    variable: var::BALANCE_DIRECT,
+    variable: var::BALANCE,
     default_value: Some(0x00),
 };
 pub const BALANCE_SET: CommandSpec = CommandSpec {
@@ -131,7 +118,7 @@ pub const BALANCE_STEP: CommandSpec = CommandSpec {
 // ---- Dim ----
 pub const DIM_GET: CommandSpec = CommandSpec {
     cmd: CMD_WRITE,
-    variable: var::DIM_DIRECT,
+    variable: var::DIM,
     default_value: Some(0x00),
 };
 pub const DIM_SET: CommandSpec = CommandSpec {
