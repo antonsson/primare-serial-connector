@@ -42,8 +42,25 @@ impl SerialConnection {
         self.dead
     }
 
+    /// Drain any pending data from the serial buffer.
+    async fn drain_buffer(&mut self) {
+        let mut buf = [0u8; 64];
+        loop {
+            match timeout(Duration::from_millis(10), self.port.read(&mut buf)).await {
+                Ok(Ok(0)) | Err(_) => break, // No data or timeout
+                Ok(Ok(n)) => {
+                    trace!("Drained {} bytes: {:02X?}", n, &buf[..n]);
+                }
+                Ok(Err(_)) => break,
+            }
+        }
+    }
+
     /// Send a raw frame and read back one reply frame.
     pub async fn send_recv(&mut self, frame: &[u8]) -> ApiResult<Reply> {
+        // Drain any stale data from buffer first
+        self.drain_buffer().await;
+
         trace!("TX: {:02X?}", frame);
 
         if let Err(e) = self.port.write_all(frame).await {
@@ -367,9 +384,11 @@ impl SerialConnection {
         if !(1..=7).contains(&input) {
             return Err(AppError::InvalidParameter("Input must be 1-7".into()));
         }
-        let reply = self
-            .send_command_value(INPUT_NAME_BY_ID_READ, input)
-            .await?;
+        // Firmware quirk: the device returns the PREVIOUSLY queried input's name,
+        // not the current one. Query twice and use the second response.
+        // Note: uses 1-indexed values (0x01-0x07), as 0x00 means "current input".
+        let _ = self.send_command_value(INPUT_NAME_BY_ID_READ, input).await?;
+        let reply = self.send_command_value(INPUT_NAME_BY_ID_READ, input).await?;
         Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
     }
 

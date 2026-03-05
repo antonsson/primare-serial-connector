@@ -74,9 +74,10 @@ class PrimareMediaPlayer(MediaPlayerEntity):
         self._session = session
         self._base_url = base_url
         self._status: dict = {}
-        self._input_names: dict[int, str] = {}
         self._attr_unique_id = f"{entry.data[CONF_HOST]}_{entry.data[CONF_PORT]}"
         self._scan_interval = timedelta(seconds=entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+        # Map of input number (1-7) to name, fetched from device
+        self._input_names: dict[int, str] = {}
 
         model = info.get("model", "I22")
         self._attr_device_info = DeviceInfo(
@@ -88,11 +89,26 @@ class PrimareMediaPlayer(MediaPlayerEntity):
         )
 
     async def async_added_to_hass(self) -> None:
+        await self._fetch_input_names()
         await self._refresh()
-        self._input_names = await self._fetch_input_names()
         self.async_on_remove(
             async_track_time_interval(self.hass, self._poll, self._scan_interval)
         )
+
+    async def _fetch_input_names(self) -> None:
+        """Fetch input names from the device."""
+        for i in range(1, 8):
+            try:
+                async with self._session.get(
+                    f"{self._base_url}/input/{i}/name",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as r:
+                    r.raise_for_status()
+                    data = await r.json()
+                    self._input_names[i] = data.get("name", "").strip() or f"Input {i}"
+            except Exception as err:
+                _LOGGER.warning("Failed to fetch name for input %d: %s", i, err)
+                self._input_names[i] = f"Input {i}"
 
     async def _poll(self, _now=None) -> None:
         await self._refresh()
@@ -117,19 +133,6 @@ class PrimareMediaPlayer(MediaPlayerEntity):
         ) as r:
             r.raise_for_status()
 
-    async def _fetch_input_names(self) -> dict[int, str]:
-        names = {}
-        for i in range(1, 8):
-            try:
-                async with self._session.get(
-                    f"{self._base_url}/input/{i}/name", timeout=aiohttp.ClientTimeout(total=5)
-                ) as r:
-                    data = await r.json()
-                    names[i] = data.get("name", f"Input {i}")
-            except Exception:
-                names[i] = f"Input {i}"
-        return names
-
     # ---- State properties ----
 
     @property
@@ -148,7 +151,9 @@ class PrimareMediaPlayer(MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         i = self._status.get("input")
-        return self._input_names.get(i, f"Input {i}") if i else None
+        if not i:
+            return None
+        return self._input_names.get(i, f"Input {i}")
 
     @property
     def source_list(self) -> list[str]:
@@ -181,7 +186,13 @@ class PrimareMediaPlayer(MediaPlayerEntity):
         await self._refresh()
 
     async def async_select_source(self, source: str) -> None:
-        input_num = next((n for n, name in self._input_names.items() if name == source), None)
+        """Select input source."""
+        # Find input number by name
+        input_num = None
+        for num, name in self._input_names.items():
+            if name == source:
+                input_num = num
+                break
         if input_num is None:
             _LOGGER.warning("Unknown source: %s", source)
             return
