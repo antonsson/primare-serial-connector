@@ -1,0 +1,14 @@
+[Unit]
+Description=spotd: sync Spotify (go-librespot) with the Primare I22
+After=go-librespot.service primare-i22.service
+Wants=go-librespot.service primare-i22.service
+
+[Service]
+# Set -usb-input to the I22 input wired to USB and -card to the id in /proc/asound.
+ExecStart=/usr/local/bin/spotd -usb-input CHANGEME -card CHANGEME -max-volume 50 -idle 20m
+DynamicUser=yes
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# go-librespot config. Install as /var/lib/go-librespot/config.yml
+device_name: Vardagsrum
+device_type: speaker
+audio_backend: alsa
+# plughw converts only when the stream format doesn't match the card; find the id with: aplay -l
+audio_device: plughw:CARD=CHANGEME
+bitrate: 320
+# Stream at full level; spotd forwards the Spotify slider to the amp instead.
+external_volume: true
+volume_steps: 100
+zeroconf_enabled: true
+credentials:
+  type: zeroconf
+  zeroconf:
+    persist_credentials: true
+server:
+  enabled: true
+  address: 127.0.0.1
+  port: 3678
