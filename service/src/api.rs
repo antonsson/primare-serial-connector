@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -48,6 +49,7 @@ pub enum IrSource {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/", get(|| async { Html(include_str!("ui.html")) }))
         .route("/health", get(health_check))
         .route("/status", get(get_status))
         .route("/power", get(get_power).post(set_power))
