@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestVolumeRoundTrip(t *testing.T) {
@@ -30,49 +33,111 @@ func TestVolumeRoundTrip(t *testing.T) {
 	}
 }
 
-// recorder is a fake HTTP server that logs "METHOD /path body" lines.
+func TestTranslate(t *testing.T) {
+	cases := map[string][]event{
+		`{"type":"device_changed","is_active":true,"device_name":"x"}`: {{kind: "active"}},
+		`{"type":"auth_state","logged_in":true,"is_active":false}`:     {{kind: "inactive"}},
+		`{"type":"playback_changed","status":"paused"}`:                {{kind: "paused"}},
+		`{"type":"playback_state","status":"playing","volume":65}`:     {{kind: "playing"}}, // snapshot volume not forwarded
+		`{"type":"volume_changed","volume":42}`:                        {{kind: "volume", volume: 42}},
+		`{"type":"position_sync","position":{}}`:                       nil,
+	}
+	for in, want := range cases {
+		var m soloistMsg
+		if err := json.Unmarshal([]byte(in), &m); err != nil {
+			t.Fatal(err)
+		}
+		got := translate(m)
+		if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
+			t.Errorf("%s: got %v, want %v", in, got, want)
+		}
+	}
+}
+
+// recorder logs calls as "METHOD /path body" (ampd) or the raw JSON command (Soloist).
 type recorder struct {
 	mu    sync.Mutex
 	calls []string
 }
 
-func (r *recorder) server(t *testing.T) *httptest.Server {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		b, _ := io.ReadAll(req.Body)
-		r.mu.Lock()
-		r.calls = append(r.calls, req.Method+" "+req.URL.Path+" "+string(b))
-		r.mu.Unlock()
-		json.NewEncoder(w).Encode(ampStatus{Power: true, Volume: 20, Input: 3})
-	}))
-	t.Cleanup(s.Close)
-	return s
+func (r *recorder) add(s string) {
+	r.mu.Lock()
+	r.calls = append(r.calls, s)
+	r.mu.Unlock()
 }
 
-func (r *recorder) has(prefix string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, c := range r.calls {
-		if len(c) >= len(prefix) && c[:len(prefix)] == prefix {
-			return true
+// has waits briefly, since Soloist commands arrive asynchronously over the WebSocket.
+func (r *recorder) has(substr string) bool {
+	for range 50 {
+		r.mu.Lock()
+		for _, c := range r.calls {
+			if strings.Contains(c, substr) {
+				r.mu.Unlock()
+				return true
+			}
 		}
+		r.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 	return false
 }
 
+func fakeAmp(t *testing.T, r *recorder) string {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		b, _ := io.ReadAll(req.Body)
+		r.add(req.Method + " " + req.URL.Path + " " + strings.TrimSpace(string(b)))
+		json.NewEncoder(w).Encode(ampStatus{Power: true, Volume: 20, Input: 3})
+	}))
+	t.Cleanup(s.Close)
+	return s.URL
+}
+
+func fakeSoloist(t *testing.T, r *recorder) string {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conn, err := websocket.Accept(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, data, err := conn.Read(req.Context())
+			if err != nil {
+				return
+			}
+			r.add(string(data))
+		}
+	}))
+	t.Cleanup(s.Close)
+	return "ws" + strings.TrimPrefix(s.URL, "http")
+}
+
 func newTestController(t *testing.T) (*controller, *recorder, *recorder) {
-	amp, ls := &recorder{}, &recorder{}
+	amp, sol := &recorder{}, &recorder{}
 	cfg := config{usbInput: 3, maxVolume: 50, idle: time.Minute}
-	c := newController(cfg, &ampClient{amp.server(t).URL, http.DefaultClient}, &librespot{ls.server(t).URL, http.DefaultClient})
-	return c, amp, ls
+	s := &soloist{url: fakeSoloist(t, sol)}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go s.events(ctx, make(chan event, 32))
+	for range 100 { // wait for the WebSocket to connect
+		s.mu.Lock()
+		ok := s.conn != nil
+		s.mu.Unlock()
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	c := newController(cfg, &ampClient{fakeAmp(t, amp), http.DefaultClient}, s)
+	return c, amp, sol
 }
 
 var ctx = context.Background()
 
 func TestInputChangedWhilePlayingPausesSpotify(t *testing.T) {
-	c, _, ls := newTestController(t)
+	c, _, sol := newTestController(t)
 	c.st, c.playing = ampStatus{Power: true, Volume: 20, Input: 3}, true
 	c.onAmp(ctx, polled{st: ampStatus{Power: true, Volume: 20, Input: 1}, started: time.Now()})
-	if !ls.has("POST /player/pause") {
+	if !sol.has(`"command":"pause"`) {
 		t.Fatal("expected pause when input switched to vinyl")
 	}
 	if !c.idleSince.IsZero() {
@@ -81,25 +146,25 @@ func TestInputChangedWhilePlayingPausesSpotify(t *testing.T) {
 }
 
 func TestSinglePollErrorIsIgnored(t *testing.T) {
-	c, _, ls := newTestController(t)
+	c, _, _ := newTestController(t)
 	c.st, c.playing = ampStatus{Power: true, Input: 3}, true
 	c.onAmp(ctx, polled{err: errors.New("timeout"), started: time.Now()})
-	if ls.has("POST /player/pause") || !c.owned(c.st) {
+	if !c.owned(c.st) || !c.playing {
 		t.Fatal("one failed poll must not count as amp off")
 	}
 	c.onAmp(ctx, polled{err: errors.New("timeout"), started: time.Now()})
-	if !ls.has("POST /player/pause") {
+	if c.owned(c.st) || c.playing {
 		t.Fatal("two failed polls means amp off: expected pause")
 	}
 }
 
 func TestStalePollIsDropped(t *testing.T) {
-	c, _, ls := newTestController(t)
+	c, _, _ := newTestController(t)
 	c.st, c.playing = ampStatus{Power: true, Input: 3}, true
 	started := time.Now()
 	c.lastWrite.Store(time.Now().Add(time.Millisecond).UnixNano())
 	c.onAmp(ctx, polled{st: ampStatus{Power: false}, started: started})
-	if ls.has("POST /player/pause") {
+	if !c.owned(c.st) || !c.playing {
 		t.Fatal("poll started before our write must be ignored")
 	}
 }
@@ -118,10 +183,23 @@ func TestIdlePowerOffOnlyForSpotifySource(t *testing.T) {
 	}
 }
 
+func TestSnapshotIdleDoesNotStartTimer(t *testing.T) {
+	c, _, _ := newTestController(t)
+	c.onEvent(ctx, event{kind: "idle"}) // playback_state sent on every (re)connect
+	if !c.idleSince.IsZero() {
+		t.Fatal("idle without prior playback must not start the power-off timer")
+	}
+	c.playing = true
+	c.onEvent(ctx, event{kind: "paused"})
+	if c.idleSince.IsZero() {
+		t.Fatal("pause after playback must start the timer")
+	}
+}
+
 func TestSpotifyVolumeIgnoredOnOtherSource(t *testing.T) {
 	c, _, _ := newTestController(t)
 	c.st = ampStatus{Power: true, Volume: 20, Input: 1}
-	c.onEvent(ctx, lsEvent{Type: "volume", Data: json.RawMessage(`{"value":90,"max":100}`)})
+	c.onEvent(ctx, event{kind: "volume", volume: 90})
 	select {
 	case <-c.volSignal:
 		t.Fatal("Spotify volume must not reach the amp while TV/Vinyl is selected")
@@ -130,16 +208,16 @@ func TestSpotifyVolumeIgnoredOnOtherSource(t *testing.T) {
 }
 
 func TestClaimSwitchesInputAndSyncsSlider(t *testing.T) {
-	c, amp, ls := newTestController(t)
+	c, amp, sol := newTestController(t)
 	c.st = ampStatus{Power: true, Volume: 20, Input: 1}
-	c.onEvent(ctx, lsEvent{Type: "playing"})
+	c.onEvent(ctx, event{kind: "playing"})
 	if !amp.has(`POST /input {"input":3}`) {
 		t.Fatal("expected switch to USB input")
 	}
 	if amp.has("POST /power") {
 		t.Fatal("amp already on: no power command expected")
 	}
-	if !ls.has(`POST /player/volume {"volume":63}`) { // amp 20 of max 50
+	if !sol.has(`"volume":63`) { // amp 20 of max 50
 		t.Fatal("expected Spotify slider set from amp volume")
 	}
 }

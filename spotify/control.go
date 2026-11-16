@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"math"
 	"os"
@@ -10,14 +9,17 @@ import (
 	"time"
 )
 
+// spotifyMax is Soloist's volume scale: 0-100.
+const spotifyMax = 100
+
 type config struct {
-	ampURL       string
-	librespotURL string
-	usbInput     int           // amp input wired to the USB DAC
-	maxVolume    int           // amp level that Spotify 100% maps to
-	idle         time.Duration // power off after this long without Spotify playback
-	poll         time.Duration
-	card         string // /proc/asound/<card> to wait for after power on; empty skips
+	ampURL     string
+	soloistURL string
+	usbInput   int           // amp input wired to the USB DAC
+	maxVolume  int           // amp level that Spotify 100% maps to
+	idle       time.Duration // power off after this long without Spotify playback
+	poll       time.Duration
+	card       string // /proc/asound/<card> to wait for after power on; empty skips
 }
 
 // polled is one amp status poll; started lets the loop drop polls that overlap our own writes.
@@ -31,13 +33,12 @@ type polled struct {
 type controller struct {
 	cfg config
 	amp *ampClient
-	ls  *librespot
+	sol *soloist
 
 	st        ampStatus // last known amp state
 	pollErrs  int
 	playing   bool
 	idleSince time.Time
-	volMax    int       // Spotify volume steps, from volume events
 	ignoreVol time.Time // drop Spotify volume events until then (session start, our own echo)
 
 	pendingVol atomic.Int64
@@ -45,14 +46,14 @@ type controller struct {
 	lastWrite  atomic.Int64 // unix nanos of last completed amp write
 }
 
-func newController(cfg config, amp *ampClient, ls *librespot) *controller {
-	return &controller{cfg: cfg, amp: amp, ls: ls, volMax: 100, volSignal: make(chan struct{}, 1)}
+func newController(cfg config, amp *ampClient, sol *soloist) *controller {
+	return &controller{cfg: cfg, amp: amp, sol: sol, volSignal: make(chan struct{}, 1)}
 }
 
 func (c *controller) run(ctx context.Context) {
-	events := make(chan lsEvent, 32)
+	events := make(chan event, 32)
 	statuses := make(chan polled, 4)
-	go c.ls.events(ctx, events)
+	go c.sol.events(ctx, events)
 	go c.pollAmp(ctx, statuses)
 	go c.volumeWriter(ctx)
 	idle := time.NewTicker(30 * time.Second)
@@ -73,29 +74,27 @@ func (c *controller) run(ctx context.Context) {
 
 func (c *controller) owned(s ampStatus) bool { return s.Power && s.Input == c.cfg.usbInput }
 
-func (c *controller) onEvent(ctx context.Context, ev lsEvent) {
-	switch ev.Type {
+func (c *controller) onEvent(ctx context.Context, ev event) {
+	switch ev.kind {
 	case "active":
 		log.Print("spotify: active")
 		c.claim(ctx)
-	case "will_play", "playing":
+	case "buffering", "playing":
 		c.playing = true
 		if !c.owned(c.st) {
 			c.claim(ctx)
 		}
-	case "paused", "stopped", "not_playing", "inactive":
-		c.playing = false
-		c.idleSince = time.Now()
-	case "volume":
-		var v lsVolume
-		if err := json.Unmarshal(ev.Data, &v); err != nil || v.Max <= 0 {
-			return
+	case "paused", "idle", "inactive":
+		// Only a stop after playback starts the timer; the on-connect snapshot must not.
+		if c.playing {
+			c.idleSince = time.Now()
 		}
-		c.volMax = v.Max
+		c.playing = false
+	case "volume":
 		if time.Now().Before(c.ignoreVol) || !c.owned(c.st) {
 			return
 		}
-		level := toAmp(v.Value, v.Max, c.cfg.maxVolume)
+		level := toAmp(ev.volume, spotifyMax, c.cfg.maxVolume)
 		if level == c.st.Volume {
 			return // echo of our own amp->Spotify sync
 		}
@@ -132,6 +131,7 @@ func (c *controller) claim(ctx context.Context) {
 			return
 		}
 		c.st.Power, c.st.Input = true, c.cfg.usbInput
+		c.idleSince = time.Now() // device picked but nothing played: still power off later
 		if st, err := c.amp.status(ctx); err == nil {
 			c.st = st
 		}
@@ -159,7 +159,7 @@ func (c *controller) waitCard(ctx context.Context) {
 // syncSpotify sets the Spotify slider to the amp's volume.
 func (c *controller) syncSpotify(ctx context.Context) {
 	c.ignoreVol = time.Now().Add(2 * time.Second) // covers the session's initial volume event
-	if err := c.ls.setVolume(ctx, toSpotify(c.st.Volume, c.volMax, c.cfg.maxVolume)); err != nil {
+	if err := c.sol.setVolume(ctx, toSpotify(c.st.Volume, spotifyMax, c.cfg.maxVolume)); err != nil {
 		log.Printf("spotify: set volume: %v", err)
 	}
 }
@@ -184,7 +184,7 @@ func (c *controller) onAmp(ctx context.Context, p polled) {
 	switch {
 	case was && !now && c.playing:
 		log.Printf("amp: off or input changed (power=%v input=%d), pausing Spotify", st.Power, st.Input)
-		if err := c.ls.pause(ctx); err != nil {
+		if err := c.sol.pause(ctx); err != nil {
 			log.Printf("spotify: pause: %v", err)
 		}
 		c.playing = false

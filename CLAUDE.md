@@ -4,7 +4,7 @@ Solo repo: commit directly on main, no feature branches.
 
 ## Components
 - service/  Rust REST bridge to the I22 over RS232 (ampd). Protocol notes in src/protocol.rs.
-- spotify/  Go: syncs go-librespot (Spotify Connect) with ampd. See spotify/README.md.
+- spotify/  Go: syncs Spotify Soloist (official headless Connect client) with ampd. See spotify/README.md.
 - home-assistant-plugin/  Python HA media_player, polls ampd /status.
 
 ## Test

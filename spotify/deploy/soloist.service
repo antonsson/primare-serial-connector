@@ -1,0 +1,18 @@
+# systemd user unit: ~/.config/systemd/user/soloist.service
+# Key file ~/.config/soloist/env (chmod 600):  SOLOIST_API_KEY=...
+[Unit]
+Description=Spotify Soloist (Spotify Connect)
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+EnvironmentFile=%h/.config/soloist/env
+# -d: PipeWire node.name of the I22 (wpctl status / pw-cli ls Node)
+ExecStart=%h/.local/bin/soloist -n Vardagsrum -k ${SOLOIST_API_KEY} -d CHANGEME --ws 127.0.0.1:9090
+Restart=always
+RestartSec=3
+# Exit 10 = build expired (90 days): stop instead of restart-looping; update the binary by hand.
+RestartPreventExitStatus=10
+
+[Install]
+WantedBy=default.target

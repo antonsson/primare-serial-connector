@@ -1,15 +1,15 @@
 # spotd
 
-Syncs Spotify Connect ([go-librespot](https://github.com/devgianlu/go-librespot)) with the Primare I22 through the REST service in `../service` (ampd).
+Syncs Spotify Connect ([Spotify Soloist](https://developer.spotify.com/documentation/soloist), Spotify's official headless client) with the Primare I22 through the REST service in `../service` (ampd).
 
 ```
-Spotify app ──Connect──▶ go-librespot ──ALSA──USB──▶ I22
-                           │ REST + WS 127.0.0.1:3678
+Spotify app ──Connect──▶ Soloist ──PipeWire──USB──▶ I22
+                           │ WebSocket 127.0.0.1:9090
                            ▼
                          spotd ──HTTP──▶ ampd :3000 ──RS232──▶ I22
 ```
 
-go-librespot runs with `external_volume: true`, so the stream stays at full level and the amp does all attenuation.
+Soloist instead of librespot: librespot-based players can't play on Spotify accounts created after a 2024/2025 cutoff (`audio key error 0 1`, librespot-org/librespot#1649), and Spotify may extend that.
 
 ## Behaviour
 
@@ -22,11 +22,13 @@ After that, Spotify "owns" the amp for as long as it stays on **and** on the USB
 | Spotify slider moved | Set amp volume (square curve, Spotify 100% = `-max-volume`); only while Spotify owns the amp |
 | Amp volume changed (knob/remote) | Move the Spotify slider; only while Spotify owns the amp |
 | Amp switched off or to another input while playing | Pause Spotify |
-| Spotify paused/stopped for `-idle` | Power off, but only if the amp is still on the USB input |
+| Spotify paused/stopped (or selected but never played) for `-idle` | Power off, but only if the amp is still on the USB input |
 
 ampd has no event stream, so spotd polls `GET /status` every second, and pauses polling for 2 s after its own writes.
 The amp counts as off after two failed polls in a row (ampd errors when the amp is in standby).
 Spotify volume events are ignored for 2 s after a takeover, so a new session can't jump the amp to an old level.
+
+**Untested:** Soloist has no documented "external volume" mode. If it also scales the samples, volume is applied twice (Soloist + amp). Check with `wpctl status` while moving the Spotify slider: the Soloist stream volume should stay at 100%.
 
 ## Build and test
 
@@ -37,20 +39,45 @@ CGO_ENABLED=0 go build -trimpath -ldflags=-s -o spotd .
 
 ## Deploy (Arch, x86_64)
 
+Everything runs as systemd **user** services of one user (Soloist needs PipeWire). ampd stays a system service.
+
 ```bash
-curl -fsSL https://github.com/devgianlu/go-librespot/releases/download/v0.10.6/go-librespot_linux_x86_64.tar.gz \
-  | sudo tar -xz -C /usr/local/bin go-librespot
-sudo install -m755 spotd /usr/local/bin/
-sudo install -Dm644 deploy/config.yml /var/lib/go-librespot/config.yml   # set audio_device
-sudo install -m644 deploy/go-librespot.service deploy/spotd.service /etc/systemd/system/  # set CHANGEME values
-sudo systemctl daemon-reload
-sudo systemctl enable --now go-librespot spotd
-journalctl -fu spotd
+sudo pacman -S pipewire wireplumber pipewire-pulse
+sudo loginctl enable-linger $USER        # start user services at boot without login
+systemctl --user enable --now pipewire wireplumber
+
+# Soloist: official build, see "Updating Soloist" below
+curl -fsSL https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz | tar -xz -C ~/.local/bin soloist
+install -Dm600 /dev/null ~/.config/soloist/env
+echo 'SOLOIST_API_KEY=<key from developer.spotify.com/dashboard/soloist (Premium)>' > ~/.config/soloist/env
+install -Dm644 deploy/soloist.service ~/.config/systemd/user/soloist.service  # set -d CHANGEME
+systemctl --user enable --now soloist
+# pick "Vardagsrum" in the Spotify app once to pair
+
+install -Dm755 spotd ~/.local/bin/spotd
+install -Dm644 deploy/spotd.service ~/.config/systemd/user/spotd.service   # set CHANGEME values
+systemctl --user daemon-reload
+systemctl --user enable --now spotd
+journalctl --user -fu spotd
 ```
 
+### Updating Soloist
+
+Builds expire 90 days after their build date (`soloist --version` shows it). An expired build exits with code 10 and the unit stops instead of restarting, so Spotify just disappears from the device list. Update:
+
+```bash
+curl -fsSL https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz | tar -xz -C ~/.local/bin soloist
+systemctl --user restart soloist
+```
+
+The pairing is kept in `~/.local/share/soloist`.
+
 Find the values:
-- `audio_device` / `-card`: `aplay -l` with the amp on; the card id is the name in `/proc/asound/` (e.g. `CARD=I22` and `-card I22`).
+- `-d` (PipeWire device): `wpctl status` / `pw-cli ls Node` with the amp on; use the I22's `node.name` (`alsa_output.usb-…`).
+- `-card`: the I22's name in `/proc/asound/` with the amp on (e.g. `I22`).
 - `-usb-input`: `curl localhost:3000/input/<n>/name` for n = 1-7.
+
+Keep the Soloist WebSocket on 127.0.0.1: it has no authentication.
 
 ## Flags
 
@@ -61,5 +88,5 @@ Find the values:
 | `-idle` | 20m | Power off after Spotify idle this long |
 | `-card` | "" | ALSA card id to wait for after power on |
 | `-amp` | http://127.0.0.1:3000 | ampd URL |
-| `-librespot` | http://127.0.0.1:3678 | go-librespot API URL |
+| `-soloist` | ws://127.0.0.1:9090 | Soloist WebSocket URL (soloist `--ws`) |
 | `-poll` | 1s | Amp status poll interval |

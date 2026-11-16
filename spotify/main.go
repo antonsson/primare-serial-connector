@@ -1,4 +1,4 @@
-// spotd syncs go-librespot (Spotify Connect) with the Primare I22 via ampd.
+// spotd syncs Spotify Soloist (Spotify Connect) with the Primare I22 via ampd.
 package main
 
 import (
@@ -15,7 +15,7 @@ import (
 func main() {
 	var cfg config
 	flag.StringVar(&cfg.ampURL, "amp", "http://127.0.0.1:3000", "ampd base URL")
-	flag.StringVar(&cfg.librespotURL, "librespot", "http://127.0.0.1:3678", "go-librespot API base URL")
+	flag.StringVar(&cfg.soloistURL, "soloist", "ws://127.0.0.1:9090", "Soloist WebSocket URL (soloist --ws)")
 	flag.IntVar(&cfg.usbInput, "usb-input", 0, "amp input (1-7) wired to the USB DAC (required)")
 	flag.IntVar(&cfg.maxVolume, "max-volume", 50, "amp level (0-79) that Spotify 100% maps to")
 	flag.DurationVar(&cfg.idle, "idle", 20*time.Minute, "power off the amp after Spotify is idle this long")
@@ -32,7 +32,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Timeout: 5 * time.Second}
-	c := newController(cfg, &ampClient{cfg.ampURL, client}, &librespot{cfg.librespotURL, client})
-	log.Printf("spotd: amp=%s librespot=%s usb-input=%d max-volume=%d", cfg.ampURL, cfg.librespotURL, cfg.usbInput, cfg.maxVolume)
+	c := newController(cfg, &ampClient{cfg.ampURL, client}, &soloist{url: cfg.soloistURL})
+	log.Printf("spotd: amp=%s soloist=%s usb-input=%d max-volume=%d", cfg.ampURL, cfg.soloistURL, cfg.usbInput, cfg.maxVolume)
 	c.run(ctx)
 }
