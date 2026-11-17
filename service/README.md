@@ -31,44 +31,6 @@ cargo install cross
 cross build --release --target aarch64-unknown-linux-gnu
 ```
 
-## Docker Deployment (Raspberry Pi 5)
-
-### 1. Build ARM64 image (on x86 dev machine)
-
-```bash
-# Enable buildx for cross-platform builds (one-time)
-docker buildx create --use
-
-# Build for ARM64 and export to file
-docker buildx build --platform linux/arm64 -t primare-i22-rs232:latest --load .
-docker save primare-i22-rs232:latest | gzip > primare-i22-arm64.tar.gz
-
-# Copy to Pi
-scp primare-i22-arm64.tar.gz pi@<pi-ip>:~
-scp ../docker-compose.yml pi@<pi-ip>:~
-```
-
-### 2. Deploy on Raspberry Pi
-
-```bash
-# Load the image
-gunzip -c primare-i22-arm64.tar.gz | docker load
-
-# Start the service
-docker compose up -d
-
-# Verify
-curl http://localhost:3000/health
-# {"status":"ok","serial_ok":true}
-```
-
-### Alternative: Build on Pi directly
-
-If building on the Pi itself:
-```bash
-docker compose up -d --build
-```
-
 ## Usage
 
 ```bash
@@ -129,7 +91,7 @@ Or open http://localhost:3000/ for the web UI.
 Web UI for manual control.
 
 ### `GET /health`
-Health check for container orchestration.
+Health check.
 ```json
 { "status": "ok", "serial_ok": true }
 ```

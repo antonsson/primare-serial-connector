@@ -37,7 +37,7 @@ curl localhost:3000/status
 cd spotify && go build -o spotd . && ./spotd -usb-input 7
 ```
 
-Deployment (Docker or systemd for ampd, systemd user services for Soloist and spotd) is described in each component's README.
+Deployment (systemd for ampd, systemd user services for Soloist and spotd) is described in each component's README.
 
 ## Test
 
