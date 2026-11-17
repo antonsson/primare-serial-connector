@@ -1,30 +1,22 @@
 package main
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestFindStream(t *testing.T) {
 	dump := []byte(`[
 	 {"id": 48, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Sink", "node.name": "soloist"}}},
-	 {"id": 54, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Stream/Output/Audio", "application.name": "Spotify", "media.name": "Spotify", "node.name": "spotify"}}},
+	 {"id": 54, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Stream/Output/Audio", "application.name": "Spotify", "media.name": "Spotify", "node.name": "spotify"},
+	   "params": {"Props": [{"volume": 1.0, "channelVolumes": [0.064, 0.064], "softVolumes": [0.5, 0.5]}, {"params": []}]}}},
 	 {"id": 60, "type": "PipeWire:Interface:Port", "info": {"props": {}}}
 	]`)
-	for _, m := range []string{"spotify"} {
-		if id, err := findStream(dump, m); err != nil || id != 54 {
-			t.Errorf("findStream(%q) = %d, %v; want 54", m, id, err)
-		}
+	s, err := findStream(dump, "spotify")
+	if err != nil || s.id != 54 || !slices.Equal(s.soft, []float64{0.5, 0.5}) {
+		t.Errorf("findStream(spotify) = %+v, %v; want id 54, soft [0.5 0.5]", s, err)
 	}
-	if id, _ := findStream(dump, "soloist"); id != 0 {
-		t.Errorf("findStream(soloist) = %d; want 0 (sink node.name must not match)", id)
-	}
-}
-
-func TestParseVolume(t *testing.T) {
-	for in, want := range map[string]float64{"Volume: 0.40\n": 0.40, "Volume: 1.00 [MUTED]\n": 1.0} {
-		if v, err := parseVolume(in); err != nil || v != want {
-			t.Errorf("parseVolume(%q) = %v, %v", in, v, err)
-		}
-	}
-	if _, err := parseVolume("garbage"); err == nil {
-		t.Error("want error")
+	if s, _ := findStream(dump, "soloist"); s.id != 0 {
+		t.Errorf("findStream(soloist) = %d; want 0 (sink node.name must not match)", s.id)
 	}
 }

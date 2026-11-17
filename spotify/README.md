@@ -28,7 +28,8 @@ ampd has no event stream, so spotd polls `GET /status` every second, and pauses 
 The amp counts as off after two failed polls in a row (ampd errors when the amp is in standby).
 Spotify volume events are ignored for 2 s after a takeover, so a new session can't jump the amp to an old level.
 
-Soloist has no fixed-volume mode: it applies the Spotify slider as PipeWire stream volume. spotd keeps that stream at 100% (`wpctl set-volume`, on every slider change, at playback start and every 5 s), so only the amp sets loudness. You may hear a brief dip while dragging the slider before the reset lands. Soloist runs with `-i 100` so new sessions start at full stream volume.
+Soloist has no fixed-volume mode: it applies the Spotify slider as PipeWire stream volume. A PipeWire stream has two volumes: `channelVolumes` (what Soloist and `wpctl` set and read) and `softVolumes` (the gain actually applied). Soloist reads `channelVolumes` back and reports any change as a slider move, so resetting it with `wpctl` makes spotd fight the remote. spotd leaves `channelVolumes` alone and keeps only `softVolumes` at 1.0 (`pw-cli set-param <id> Props '{ softVolumes: [1.0, 1.0] }'`, on every slider change, at playback start and every 5 s). Once that's set, PipeWire stops copying `channelVolumes` into it, so only the amp sets loudness. Don't use `wpctl set-volume` on the Spotify stream: it would move the Spotify slider and, through spotd, the amp. Check the real gain with `pw-dump <id>` (`softVolumes`).
+Soloist runs with `-i 100` so new sessions start at full stream volume.
 
 ## Build and test
 
@@ -88,5 +89,5 @@ Keep the Soloist WebSocket on 127.0.0.1: it has no authentication.
 | `-card` | "" | ALSA card id to wait for after power on |
 | `-amp` | http://127.0.0.1:3000 | ampd URL |
 | `-soloist` | ws://127.0.0.1:9090 | Soloist WebSocket URL (soloist `--ws`) |
-| `-stream` | spotify | Soloist's PipeWire stream to keep at 100% (matches `application.name` or `node.name`, case-insensitive; Soloist sets both to Spotify); empty disables |
+| `-stream` | spotify | Soloist's PipeWire stream whose applied gain (softVolumes) is kept at 100% (matches `application.name` or `node.name`, case-insensitive; Soloist sets both to Spotify); empty disables |
 | `-poll` | 1s | Amp status poll interval |

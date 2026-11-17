@@ -11,20 +11,25 @@ import (
 	"time"
 )
 
-// streamPinner keeps Soloist's PipeWire stream volume at 100%. Soloist applies
-// the Spotify slider as PipeWire stream volume, and spotd also maps the slider to
-// the amp, so without this the volume would be applied twice.
+// streamPinner keeps the gain PipeWire applies to Soloist's stream at 100%.
+// Soloist applies the Spotify slider as stream volume, and spotd also maps the
+// slider to the amp, so without this the volume would be applied twice.
+//
+// A stream has two volumes: channelVolumes (what wpctl and Soloist set and read)
+// and softVolumes (the gain actually applied). Soloist reads channelVolumes back
+// and reports any change as a Spotify slider move, so resetting it fights the
+// remote. spotd only sets softVolumes: Soloist doesn't see that, and once set
+// explicitly PipeWire stops copying channelVolumes into it (verified on 1.6).
 type streamPinner struct {
 	match string // matched against the stream's binary / application / node name
 	kick  chan struct{}
-	id    int // cached node id; 0 = unknown
 }
 
 func newStreamPinner(match string) *streamPinner {
 	return &streamPinner{match: strings.ToLower(match), kick: make(chan struct{}, 1)}
 }
 
-// poke asks for a reset soon; never blocks. Safe on a nil pinner.
+// poke asks for a check soon; never blocks. Safe on a nil pinner.
 func (p *streamPinner) poke() {
 	if p == nil {
 		return
@@ -45,76 +50,72 @@ func (p *streamPinner) run(ctx context.Context) {
 		case <-t.C:
 			p.pin(ctx, false)
 		case <-p.kick:
-			// Soloist may apply the new volume just after its WebSocket event.
-			p.pin(ctx, true)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(300 * time.Millisecond):
-			}
 			p.pin(ctx, true)
 		}
 	}
 }
 
-// pin sets the stream to 1.0 if it exists and isn't there already.
+// pin sets the stream's softVolumes to 1.0 if it exists and isn't there already.
 // kicked = called because of a volume/playback event (log a missing stream).
 func (p *streamPinner) pin(ctx context.Context, kicked bool) {
-	if p.id != 0 {
-		if v, err := getVolume(ctx, p.id); err == nil {
-			if v != 1.0 {
-				p.set(ctx, v)
-			}
-			return
-		}
-		p.id = 0 // stream gone (Soloist restarted or stopped playing)
+	out, err := exec.CommandContext(ctx, "pw-dump").Output()
+	if err != nil {
+		log.Printf("pipewire: pw-dump: %v", err)
+		return
 	}
-	id, err := p.find(ctx)
+	s, err := findStream(out, p.match)
 	if err != nil {
 		log.Printf("pipewire: %v", err)
 		return
 	}
-	if id == 0 {
+	if s.id == 0 {
 		if kicked {
 			log.Printf("pipewire: no playback stream matching %q (check: wpctl inspect <id> | grep -E 'process.binary|application.name|node.name')", p.match)
 		}
 		return
 	}
-	log.Printf("pipewire: tracking Soloist stream %d", id)
-	p.id = id
-	if v, err := getVolume(ctx, id); err == nil && v != 1.0 {
-		p.set(ctx, v)
-	}
-}
-
-func (p *streamPinner) set(ctx context.Context, from float64) {
-	if err := exec.CommandContext(ctx, "wpctl", "set-volume", strconv.Itoa(p.id), "1.0").Run(); err != nil {
-		log.Printf("pipewire: set-volume %d: %v", p.id, err)
+	if len(s.soft) == 0 || allOne(s.soft) {
 		return
 	}
-	log.Printf("pipewire: Soloist stream %d volume %.2f -> 1.00", p.id, from)
-}
-
-// find returns the id of the playback stream whose binary, application or node
-// name equals p.match (case-insensitive), or 0 if there is none.
-func (p *streamPinner) find(ctx context.Context) (int, error) {
-	out, err := exec.CommandContext(ctx, "pw-dump").Output()
-	if err != nil {
-		return 0, fmt.Errorf("pw-dump: %w", err)
+	ones := strings.TrimSuffix(strings.Repeat("1.0, ", len(s.soft)), ", ")
+	if err := exec.CommandContext(ctx, "pw-cli", "set-param", strconv.Itoa(s.id), "Props", "{ softVolumes: ["+ones+"] }").Run(); err != nil {
+		log.Printf("pipewire: set softVolumes on %d: %v", s.id, err)
+		return
 	}
-	return findStream(out, p.match)
+	log.Printf("pipewire: Soloist stream %d softVolumes %v -> 1.0", s.id, s.soft)
 }
 
-func findStream(dump []byte, match string) (int, error) {
+func allOne(v []float64) bool {
+	for _, x := range v {
+		if x != 1.0 {
+			return false
+		}
+	}
+	return true
+}
+
+type stream struct {
+	id   int // 0 = not found
+	soft []float64
+}
+
+// findStream returns the playback stream whose binary, application or node
+// name equals match (case-insensitive), with its softVolumes.
+func findStream(dump []byte, match string) (stream, error) {
 	var objs []struct {
 		ID   int    `json:"id"`
 		Type string `json:"type"`
 		Info struct {
-			Props map[string]any `json:"props"`
+			Props  map[string]any `json:"props"`
+			Params struct {
+				Props []struct {
+					SoftVolumes []float64 `json:"softVolumes"`
+				} `json:"Props"`
+			} `json:"params"`
 		} `json:"info"`
 	}
 	if err := json.Unmarshal(dump, &objs); err != nil {
-		return 0, fmt.Errorf("pw-dump: %w", err)
+		return stream{}, fmt.Errorf("pw-dump: %w", err)
 	}
 	for _, o := range objs {
 		props := o.Info.Props
@@ -123,26 +124,15 @@ func findStream(dump []byte, match string) (int, error) {
 		}
 		for _, k := range []string{"application.process.binary", "application.name", "node.name"} {
 			if s, ok := props[k].(string); ok && strings.ToLower(s) == match {
-				return o.ID, nil
+				st := stream{id: o.ID}
+				for _, pp := range o.Info.Params.Props {
+					if len(pp.SoftVolumes) > 0 {
+						st.soft = pp.SoftVolumes
+					}
+				}
+				return st, nil
 			}
 		}
 	}
-	return 0, nil
-}
-
-// getVolume parses `wpctl get-volume <id>`: "Volume: 0.40" (optionally " [MUTED]").
-func getVolume(ctx context.Context, id int) (float64, error) {
-	out, err := exec.CommandContext(ctx, "wpctl", "get-volume", strconv.Itoa(id)).Output()
-	if err != nil {
-		return 0, err
-	}
-	return parseVolume(string(out))
-}
-
-func parseVolume(s string) (float64, error) {
-	f := strings.Fields(s)
-	if len(f) < 2 || f[0] != "Volume:" {
-		return 0, fmt.Errorf("unexpected wpctl output %q", s)
-	}
-	return strconv.ParseFloat(f[1], 64)
+	return stream{}, nil
 }
