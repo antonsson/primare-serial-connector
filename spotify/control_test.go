@@ -221,3 +221,32 @@ func TestClaimSwitchesInputAndSyncsSlider(t *testing.T) {
 		t.Fatal("expected Spotify slider set from amp volume")
 	}
 }
+
+func TestVolumeAfterPlayStartIgnored(t *testing.T) {
+	c, _, sol := newTestController(t)
+	c.st = ampStatus{Power: true, Volume: 20, Input: 3} // already playing Spotify
+	c.onEvent(ctx, event{kind: "playing"})              // e.g. resume, or Soloist restarted
+	c.onEvent(ctx, event{kind: "volume", volume: 100})  // WirePlumber restore / app's remembered level
+	select {
+	case <-c.volSignal:
+		t.Fatal("volume event right after playback start must not reach the amp")
+	default:
+	}
+	if c.st.Volume != 20 {
+		t.Fatalf("amp volume = %d, want 20", c.st.Volume)
+	}
+	if !sol.has(`"volume":40`) {
+		t.Fatal("expected Spotify slider put back to the amp level (40%)")
+	}
+
+	c.ignoreVol = time.Time{} // window over: the user moves the slider
+	c.onEvent(ctx, event{kind: "volume", volume: 50})
+	select {
+	case <-c.volSignal:
+	default:
+		t.Fatal("slider moves after the window must reach the amp")
+	}
+	if c.st.Volume != 25 {
+		t.Fatalf("amp volume = %d, want 25", c.st.Volume)
+	}
+}

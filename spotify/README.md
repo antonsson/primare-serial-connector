@@ -26,7 +26,7 @@ After that, Spotify "owns" the amp for as long as it stays on **and** on the USB
 
 ampd has no event stream, so spotd polls `GET /status` every second, and pauses polling for 2 s after its own writes.
 The amp counts as off after two failed polls in a row (ampd errors when the amp is in standby).
-Spotify volume events are ignored for 2 s after a takeover, so a new session can't jump the amp to an old level.
+Spotify volume events are kept off the amp for 2 s after a takeover and after every playback start (`buffering`/`playing`); the slider is put back to the amp level instead. Soloist creates each new stream at 100% and reports that as a Spotify volume change ~150 ms after `playing` (seen on hardware), and the Spotify app may push a remembered level on resume; without the guard either would jump the amp to `-max-volume`. A slider move in those 2 s is ignored too; move it again.
 
 Soloist has no fixed-volume mode: it applies the Spotify slider as PipeWire stream volume. A PipeWire stream has two volumes: `channelVolumes` (what Soloist and `wpctl` set and read) and `softVolumes` (the gain actually applied). Soloist reads `channelVolumes` back and reports any change as a slider move, so resetting it with `wpctl` makes spotd fight the remote. spotd leaves `channelVolumes` alone and keeps only `softVolumes` at 1.0 (`pw-cli set-param <id> Props '{ softVolumes: [1.0, 1.0] }'`, on every slider change, at playback start and every 5 s). Once that's set, PipeWire stops copying `channelVolumes` into it, so only the amp sets loudness. Don't use `wpctl set-volume` on the Spotify stream: it would move the Spotify slider and, through spotd, the amp. Check the real gain with `pw-dump <id>` (`softVolumes`).
 Soloist runs with `-i 30`: spotd sets the slider to the amp level on takeover anyway, and if a stray startup volume event ever reaches the amp (e.g. Soloist restarting while it plays) it lands at a quiet 15 instead of `-max-volume`.
@@ -55,6 +55,8 @@ systemctl --user enable --now soloist
 # pick "Vardagsrum" in the Spotify app once to pair
 
 install -Dm755 spotd ~/.local/bin/spotd
+install -Dm644 deploy/50-spotify-no-restore.conf ~/.config/wireplumber/wireplumber.conf.d/50-spotify-no-restore.conf  # stop WirePlumber restoring the Spotify stream volume
+systemctl --user restart wireplumber
 install -Dm644 deploy/spotd.service ~/.config/systemd/user/spotd.service   # -usb-input / -card for your wiring
 systemctl --user daemon-reload
 systemctl --user enable --now spotd

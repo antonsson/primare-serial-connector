@@ -41,7 +41,7 @@ type controller struct {
 	pollErrs  int
 	playing   bool
 	idleSince time.Time
-	ignoreVol time.Time // drop Spotify volume events until then (session start, our own echo)
+	ignoreVol time.Time // keep Spotify volume events off the amp until then (takeover, playback start)
 
 	pendingVol atomic.Int64
 	volSignal  chan struct{}
@@ -91,6 +91,9 @@ func (c *controller) onEvent(ctx context.Context, ev event) {
 	case "buffering", "playing":
 		c.pin.poke() // new stream may start at Soloist's own volume
 		c.playing = true
+		// A new stream gets its volume set by Soloist/WirePlumber, and the Spotify
+		// app may push a remembered level on resume; none of that may reach the amp.
+		c.guardVolume()
 		if !c.owned(c.st) {
 			c.claim(ctx)
 		}
@@ -102,12 +105,19 @@ func (c *controller) onEvent(ctx context.Context, ev event) {
 		c.playing = false
 	case "volume":
 		c.pin.poke() // Soloist applies the slider to its stream; undo that
-		if time.Now().Before(c.ignoreVol) || !c.owned(c.st) {
+		if !c.owned(c.st) {
 			return
 		}
 		level := toAmp(ev.volume, spotifyMax, c.cfg.maxVolume)
 		if level == c.st.Volume {
 			return // echo of our own amp->Spotify sync
+		}
+		if time.Now().Before(c.ignoreVol) {
+			// Startup noise, not the user: keep the amp, put the slider back.
+			// The echo of that maps to c.st.Volume and stops above, so no loop.
+			log.Printf("spotify: volume %d%% right after start ignored, amp stays at %d", ev.volume, c.st.Volume)
+			c.syncSpotify(ctx)
+			return
 		}
 		c.st.Volume = level
 		c.pendingVol.Store(int64(level))
@@ -167,9 +177,12 @@ func (c *controller) waitCard(ctx context.Context) {
 	log.Printf("amp: sound card %q did not appear", c.cfg.card)
 }
 
+// guardVolume keeps Spotify volume events off the amp for the next 2 s.
+func (c *controller) guardVolume() { c.ignoreVol = time.Now().Add(2 * time.Second) }
+
 // syncSpotify sets the Spotify slider to the amp's volume.
 func (c *controller) syncSpotify(ctx context.Context) {
-	c.ignoreVol = time.Now().Add(2 * time.Second) // covers the session's initial volume event
+	c.guardVolume() // covers the session's initial volume event
 	if err := c.sol.setVolume(ctx, toSpotify(c.st.Volume, spotifyMax, c.cfg.maxVolume)); err != nil {
 		log.Printf("spotify: set volume: %v", err)
 	}
