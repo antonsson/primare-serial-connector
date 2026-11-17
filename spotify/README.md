@@ -19,7 +19,7 @@ After that, Spotify "owns" the amp for as long as it stays on **and** on the USB
 | Event | Action |
 |---|---|
 | Spotify device selected / play pressed | Power on if needed, wait for the sound card, switch to USB input, set the Spotify slider to the amp volume |
-| Spotify slider moved | Set amp volume (square curve, Spotify 100% = `-max-volume`); only while Spotify owns the amp |
+| Spotify slider moved | Set amp volume (linear, Spotify 100% = `-max-volume`, so with 50 amp 20 = 40%); only while Spotify owns the amp |
 | Amp volume changed (knob/remote) | Move the Spotify slider; only while Spotify owns the amp |
 | Amp switched off or to another input while playing | Pause Spotify |
 | Spotify paused/stopped (or selected but never played) for `-idle` | Power off, but only if the amp is still on the USB input |
@@ -29,7 +29,7 @@ The amp counts as off after two failed polls in a row (ampd errors when the amp 
 Spotify volume events are ignored for 2 s after a takeover, so a new session can't jump the amp to an old level.
 
 Soloist has no fixed-volume mode: it applies the Spotify slider as PipeWire stream volume. A PipeWire stream has two volumes: `channelVolumes` (what Soloist and `wpctl` set and read) and `softVolumes` (the gain actually applied). Soloist reads `channelVolumes` back and reports any change as a slider move, so resetting it with `wpctl` makes spotd fight the remote. spotd leaves `channelVolumes` alone and keeps only `softVolumes` at 1.0 (`pw-cli set-param <id> Props '{ softVolumes: [1.0, 1.0] }'`, on every slider change, at playback start and every 5 s). Once that's set, PipeWire stops copying `channelVolumes` into it, so only the amp sets loudness. Don't use `wpctl set-volume` on the Spotify stream: it would move the Spotify slider and, through spotd, the amp. Check the real gain with `pw-dump <id>` (`softVolumes`).
-Soloist runs with `-i 100` so new sessions start at full stream volume.
+Soloist runs with `-i 30`: spotd sets the slider to the amp level on takeover anyway, and if a stray startup volume event ever reaches the amp (e.g. Soloist restarting while it plays) it lands at a quiet 15 instead of `-max-volume`.
 
 ## Build and test
 
@@ -84,7 +84,7 @@ Keep the Soloist WebSocket on 127.0.0.1: it has no authentication.
 | Flag | Default | |
 |---|---|---|
 | `-usb-input` | (required) | I22 input wired to USB |
-| `-max-volume` | 50 | Amp level for Spotify 100% (1-79). Keep ≤ 50 so amp↔Spotify round trips are exact |
+| `-max-volume` | 50 | Amp level for Spotify 100% (1-79) |
 | `-idle` | 20m | Power off after Spotify idle this long |
 | `-card` | "" | ALSA card id to wait for after power on |
 | `-amp` | http://127.0.0.1:3000 | ampd URL |

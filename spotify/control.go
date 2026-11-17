@@ -256,14 +256,15 @@ func (c *controller) volumeWriter(ctx context.Context) {
 	}
 }
 
-// toAmp maps Spotify volume (0..max) to an amp level on a square curve, capped at ampMax.
+// toAmp maps Spotify volume (0..max) linearly to an amp level, capped at ampMax.
+// Linear because the amp's own scale already sounds even: amp 20 = Spotify 40%.
 func toAmp(v, max, ampMax int) int {
 	f := math.Min(math.Max(float64(v)/float64(max), 0), 1)
-	return int(math.Round(float64(ampMax) * f * f))
+	return int(math.Round(float64(ampMax) * f))
 }
 
 // toSpotify is the inverse of toAmp; amp levels above ampMax show as 100%.
 func toSpotify(a, max, ampMax int) int {
 	f := math.Min(math.Max(float64(a)/float64(ampMax), 0), 1)
-	return int(math.Round(float64(max) * math.Sqrt(f)))
+	return int(math.Round(float64(max) * f))
 }

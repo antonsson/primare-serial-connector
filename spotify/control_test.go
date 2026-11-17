@@ -17,8 +17,8 @@ import (
 
 func TestVolumeRoundTrip(t *testing.T) {
 	// Amp knob change -> Spotify slider -> volume event must map back to the same level,
-	// otherwise the sync would nudge the amp. Holds while ampMax <= volume steps / 2.
-	for _, ampMax := range []int{30, 50} {
+	// otherwise the sync would nudge the amp. Holds while ampMax <= volume steps.
+	for _, ampMax := range []int{30, 50, 79} {
 		for a := 0; a <= ampMax; a++ {
 			if got := toAmp(toSpotify(a, 100, ampMax), 100, ampMax); got != a {
 				t.Errorf("ampMax=%d: amp %d -> spotify %d -> amp %d", ampMax, a, toSpotify(a, 100, ampMax), got)
@@ -217,7 +217,7 @@ func TestClaimSwitchesInputAndSyncsSlider(t *testing.T) {
 	if amp.has("POST /power") {
 		t.Fatal("amp already on: no power command expected")
 	}
-	if !sol.has(`"volume":63`) { // amp 20 of max 50
+	if !sol.has(`"volume":40`) { // amp 20 of max 50
 		t.Fatal("expected Spotify slider set from amp volume")
 	}
 }
