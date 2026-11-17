@@ -1,11 +1,12 @@
 # primare-i22-rs232
 
-A lightweight REST API bridge for the **Primare I22** integrated amplifier via RS232, designed for Home Assistant integration. Built with Rust + Axum for minimal resource usage on a Raspberry Pi.
+A lightweight REST API bridge for the **Primare I22** integrated amplifier via RS232. Built with Rust + Axum for minimal resource usage on a Raspberry Pi.
 
 ## Features
 
 - Full coverage of the I22 RS232 protocol (power, volume, input, mute, balance, dim, menu, IR input)
-- Read back device state (status polling endpoint for HA sensors)
+- Read back device state (`/status` polling endpoint)
+- Built-in web UI at `/`
 - Verbose mode auto-enabled on startup
 - DLE byte escaping/unescaping per spec
 - Single binary, ~2MB, ~2MB RAM at idle
@@ -61,21 +62,6 @@ curl http://localhost:3000/health
 # {"status":"ok","serial_ok":true}
 ```
 
-### 3. Configure Home Assistant
-
-Copy the plugin to your HA config directory:
-```bash
-cp -r home-assistant-plugin/* /path/to/ha-config/custom_components/primare_i22/
-```
-
-Then in Home Assistant:
-1. Restart Home Assistant
-2. Go to **Settings → Devices & Services → Add Integration**
-3. Search for **Primare I22**
-4. Enter the Pi's IP address and port `3000`
-
-The amplifier will appear as a media player entity with power, volume, mute, and source controls.
-
 ### Alternative: Build on Pi directly
 
 If building on the Pi itself:
@@ -102,7 +88,7 @@ PRIMARE_TIMEOUT_MS=500 \
 
 ## Test Without Physical Amplifier
 
-You can test the real Home Assistant plugin -> real REST service HTTP path by mocking only the serial device.
+Run the real service against a mock amplifier on a virtual serial pair.
 
 ### 1. Create a virtual serial pair
 
@@ -129,11 +115,18 @@ PRIMARE_LISTEN=0.0.0.0:3000 \
 cargo run
 ```
 
-### 4. Point Home Assistant integration to this service
+### 4. Try it
 
-Use your machine IP and port `3000` in the Primare I22 integration setup.
+```bash
+curl localhost:3000/status
+```
+
+Or open http://localhost:3000/ for the web UI.
 
 ## API Reference
+
+### `GET /`
+Web UI for manual control.
 
 ### `GET /health`
 Health check for container orchestration.
@@ -142,7 +135,7 @@ Health check for container orchestration.
 ```
 
 ### `GET /status`
-Returns all current state in one call (ideal for HA polling).
+Returns all current state in one call (power from cache, volume and input read live).
 ```json
 {
   "power": true,
@@ -243,65 +236,6 @@ Returns all current state in one call (ideal for HA polling).
 ### `POST /factory_reset`
 ```json
 { "confirm": true }
-```
-
-## Home Assistant Integration
-
-### `configuration.yaml` — RESTful sensors
-
-```yaml
-rest:
-  - resource: http://raspberrypi.local:3000/status
-    scan_interval: 5
-    sensor:
-      - name: "Primare Volume"
-        value_template: "{{ value_json.volume }}"
-        unit_of_measurement: ""
-      - name: "Primare Input"
-        value_template: "{{ value_json.input }}"
-      - name: "Primare Power"
-        value_template: "{{ value_json.power }}"
-```
-
-### `configuration.yaml` — REST commands
-
-```yaml
-rest_command:
-  primare_volume_set:
-    url: http://raspberrypi.local:3000/volume
-    method: POST
-    content_type: application/json
-    payload: '{"level": {{ level }} }'
-
-  primare_volume_up:
-    url: http://raspberrypi.local:3000/volume
-    method: POST
-    content_type: application/json
-    payload: '{"step": 1}'
-
-  primare_volume_down:
-    url: http://raspberrypi.local:3000/volume
-    method: POST
-    content_type: application/json
-    payload: '{"step": -1}'
-
-  primare_power_toggle:
-    url: http://raspberrypi.local:3000/power
-    method: POST
-    content_type: application/json
-    payload: '{"state": "toggle"}'
-
-  primare_input_set:
-    url: http://raspberrypi.local:3000/input
-    method: POST
-    content_type: application/json
-    payload: '{"input": {{ input }} }'
-
-  primare_mute_toggle:
-    url: http://raspberrypi.local:3000/mute
-    method: POST
-    content_type: application/json
-    payload: '{}'
 ```
 
 ## systemd Service (Raspberry Pi)

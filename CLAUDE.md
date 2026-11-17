@@ -5,7 +5,6 @@ Solo repo: commit directly on main, no feature branches.
 ## Components
 - service/  Rust REST bridge to the I22 over RS232 (ampd). Protocol notes in src/protocol.rs.
 - spotify/  Go: syncs Spotify Soloist (official headless Connect client) with ampd. See spotify/README.md.
-- home-assistant-plugin/  Python HA media_player, polls ampd /status.
 
 ## Test
 - cd service && cargo test
@@ -17,4 +16,4 @@ Solo repo: commit directly on main, no feature branches.
 - A background task reads the port continuously; replies and pushes update a state cache (serial.rs AmpCache).
 - W <var> 0x00 is not a pure read: on dim 0x0A it steps brightness (seen on hardware), on mute 0x09 / standby 0x01 the spec calls it a toggle. On step vars (volume, input) it's a 0-step that returns the value.
 - /status does live reads for volume/input; power comes from the cache.
-- ampd's HTTP API is the contract for spotify/ and the HA plugin; change it carefully.
+- ampd's HTTP API is the contract for spotify/ and the web UI; change it carefully.
