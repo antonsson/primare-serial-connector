@@ -13,6 +13,8 @@ Solo repo: commit directly on main, no feature branches.
 - No hardware: socat pty pair + tools/mock_amp.py (service/README.md)
 
 ## Gotchas
-- Amp in standby doesn't answer: reads time out, ampd returns an error and marks power off.
-- /status does live serial reads (no cache); power is cached.
+- Amp in standby only answers power commands. Power can't be read (W 0x01 0x00 toggles, R gets no reply), so ampd infers it: any non-power frame = on, timeout = standby, plus standby frames the amp pushes (verbose on) on remote/front-panel use.
+- A background task reads the port continuously; replies and pushes update a state cache (serial.rs AmpCache).
+- W <var> 0x00 is not a pure read: on dim 0x0A it steps brightness (seen on hardware), on mute 0x09 / standby 0x01 the spec calls it a toggle. On step vars (volume, input) it's a 0-step that returns the value.
+- /status does live reads for volume/input; power comes from the cache.
 - ampd's HTTP API is the contract for spotify/ and the HA plugin; change it carefully.

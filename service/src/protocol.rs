@@ -146,9 +146,38 @@ pub fn parse_reply(raw: &[u8]) -> Option<Reply> {
     Some(Reply { variable, values })
 }
 
+/// Variable ID a request frame was sent for (byte after STX and CMD).
+pub fn request_variable(frame: &[u8]) -> Option<u8> {
+    frame.get(2).copied()
+}
+
+/// Whether `reply` answers a request for `request_var`. Direct (0x80) variables
+/// may reply with or without the direct bit. Remote commands (0x0F) reply with
+/// whatever variable the key press changed, so any reply matches.
+pub fn reply_matches(request_var: u8, reply: &Reply) -> bool {
+    request_var == var::REMOTE
+        || reply.variable == request_var
+        || reply.variable == request_var & 0x7F
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reply_matches() {
+        let r = |variable| Reply {
+            variable,
+            values: vec![1],
+        };
+        assert!(reply_matches(var::STANDBY_DIRECT, &r(var::STANDBY)));
+        assert!(reply_matches(
+            var::INPUT_NAME_DIRECT,
+            &r(var::INPUT_NAME_DIRECT)
+        ));
+        assert!(reply_matches(var::REMOTE, &r(var::INPUT)));
+        assert!(!reply_matches(var::VOLUME, &r(var::STANDBY)));
+    }
 
     #[test]
     fn test_build_write_volume_direct() {

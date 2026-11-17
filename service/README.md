@@ -147,10 +147,7 @@ Returns all current state in one call (ideal for HA polling).
 {
   "power": true,
   "volume": 25,
-  "input": 1,
-  "mute": false,
-  "balance": 0,
-  "dim": 2
+  "input": 1
 }
 ```
 
@@ -264,8 +261,6 @@ rest:
         value_template: "{{ value_json.input }}"
       - name: "Primare Power"
         value_template: "{{ value_json.power }}"
-      - name: "Primare Mute"
-        value_template: "{{ value_json.mute }}"
 ```
 
 ### `configuration.yaml` — REST commands

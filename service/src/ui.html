@@ -249,17 +249,26 @@ async function loadNames() {
 async function poll() {
   if (busy || dragging) return;
   try {
+    // Mute/balance/dim are not polled: their "read" frames (W var 0x00) act as
+    // toggle/step on the real amp. They update from command replies only.
     const st = await api('/status');
-    // /status hardcodes mute/balance/dim, so read those directly.
-    const [m, b, d] = await Promise.all([api('/mute'), api('/balance'), api('/dim')]);
     if (busy || dragging) return;
-    Object.assign(s, st, m, b, d);
+    Object.assign(s, st);
     $('dot').className = 'dot ok';
     $('connText').textContent = 'Online';
     render();
   } catch {
-    $('dot').className = 'dot err';
-    $('connText').textContent = 'Offline';
+    // In standby the amp only answers power commands, so /status times out.
+    // /power comes from ampd's cache, so it still answers.
+    try {
+      Object.assign(s, await api('/power'));
+      $('dot').className = 'dot ok';
+      $('connText').textContent = s.power ? 'Online' : 'Standby';
+      render();
+    } catch {
+      $('dot').className = 'dot err';
+      $('connText').textContent = 'Offline';
+    }
   }
 }
 

@@ -51,8 +51,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.port, args.baud
     );
 
-    // Create state with connection config - connection will be established on first request
     let state = Arc::new(AppState::new(args.port, args.baud, args.timeout_ms));
+
+    // Keep the port open so the reader sees frames the amp pushes on IR remote /
+    // front-panel changes, and reconnect if it dies.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = state.get_serial().await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
 
     let app = Router::new()
         .merge(api::routes())
@@ -62,7 +73,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     info!("Listening on http://{}", args.listen);
-    info!("Serial connection will be established on first request");
 
     axum::serve(listener, app).await?;
     Ok(())

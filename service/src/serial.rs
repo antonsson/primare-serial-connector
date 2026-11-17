@@ -1,125 +1,216 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::timeout;
-use tokio_serial::SerialPortBuilderExt;
-use tracing::{debug, trace, warn};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, WriteHalf};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_serial::{SerialPortBuilderExt, SerialStream};
+use tracing::{debug, info, trace, warn};
 
 use crate::commands::{
     CommandSpec, BALANCE_GET, BALANCE_SET, BALANCE_STEP, DIM_GET, DIM_SET, DIM_STEP, FACTORY_RESET,
     INPUT_GET, INPUT_NAME_BY_ID_READ, INPUT_NAME_READ, INPUT_SET, INPUT_STEP, IR_INPUT_GET,
     IR_INPUT_SET, MENU_ENTER, MENU_EXIT, MENU_NAV, MODEL_NAME_READ, MUTE_GET, MUTE_SET,
-    MUTE_TOGGLE, POWER_OFF, POWER_ON, POWER_TOGGLE, PRODUCT_LINE_READ,
-    VERBOSE_ON, VERSION_READ, VOLUME_GET, VOLUME_SET, VOLUME_STEP,
+    MUTE_TOGGLE, POWER_OFF, POWER_ON, POWER_TOGGLE, PRODUCT_LINE_READ, VERBOSE_ON, VERSION_READ,
+    VOLUME_GET, VOLUME_SET, VOLUME_STEP,
 };
 use crate::error::{ApiResult, AppError};
-use crate::protocol::{self, Reply};
+use crate::protocol::{self, var, Reply};
+
+/// Last known amp state, built from every frame the amp sends: replies to our
+/// requests and the verbose frames it pushes on IR remote / front-panel changes.
+/// None = not seen since ampd started.
+#[derive(Debug, Default, Clone)]
+pub struct AmpCache {
+    pub power: Option<bool>,
+    pub volume: Option<u8>,
+    pub input: Option<u8>,
+    pub mute: Option<bool>,
+    pub balance: Option<i8>,
+    pub dim: Option<u8>,
+}
+
+/// Shared between the reader task and the API; outlives reconnects.
+pub type SharedCache = Arc<Mutex<AmpCache>>;
+
+fn update<T: PartialEq + std::fmt::Debug>(slot: &mut Option<T>, value: T, name: &str) {
+    if slot.as_ref() != Some(&value) {
+        info!("Amp {}: {:?}", name, value);
+        *slot = Some(value);
+    }
+}
+
+impl AmpCache {
+    fn apply(&mut self, reply: &Reply) {
+        let Some(v) = reply.value() else { return };
+        // In standby the amp only answers power commands, so any other frame
+        // means it's on.
+        if reply.variable != var::STANDBY {
+            update(&mut self.power, true, "power");
+        }
+        match reply.variable {
+            var::STANDBY => update(&mut self.power, v == 0x01, "power"),
+            var::VOLUME => update(&mut self.volume, v, "volume"),
+            var::INPUT => update(&mut self.input, v, "input"),
+            var::MUTE => update(&mut self.mute, v == 0x01, "mute"),
+            var::BALANCE => update(&mut self.balance, v as i8, "balance"),
+            var::DIM => update(&mut self.dim, v, "dim"),
+            _ => {}
+        }
+    }
+}
 
 pub struct SerialConnection {
-    port: tokio_serial::SerialStream,
+    writer: WriteHalf<SerialStream>,
+    /// Every parsed frame from the reader task, in arrival order.
+    frames: mpsc::UnboundedReceiver<Reply>,
+    reader: JoinHandle<()>,
     timeout: Duration,
-    dead: bool,
-    /// Cached power state. None = unknown (not yet determined via toggle).
-    power_state: Option<bool>,
+    dead: Arc<AtomicBool>,
+    cache: SharedCache,
+    /// Verbose confirmed by the amp. Not answered in standby, so retried.
+    verbose_ok: bool,
+}
+
+impl Drop for SerialConnection {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// Read bytes until we see an unescaped DLE ETX (0x10 0x03).
+async fn read_frame<R: AsyncRead + Unpin>(port: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut prev_was_dle = false;
+
+    loop {
+        let b = port.read_u8().await?;
+        buf.push(b);
+
+        if prev_was_dle {
+            if b == protocol::ETX {
+                return Ok(buf);
+            }
+            // DLE DLE is an escaped DLE data byte — reset state so the
+            // next byte is treated fresh, not as "after a DLE".
+            prev_was_dle = false;
+        } else {
+            prev_was_dle = b == protocol::DLE;
+        }
+    }
+}
+
+/// Reads the port continuously: updates the cache from every frame and hands
+/// frames to whoever is waiting for a reply. Exits (marking the connection
+/// dead) on I/O error.
+async fn reader_task<R: AsyncRead + Unpin>(
+    mut port: R,
+    tx: mpsc::UnboundedSender<Reply>,
+    cache: SharedCache,
+    dead: Arc<AtomicBool>,
+) {
+    loop {
+        let raw = match read_frame(&mut port).await {
+            Ok(raw) => raw,
+            Err(e) => {
+                warn!("Serial read failed: {}", e);
+                dead.store(true, Ordering::Relaxed);
+                return;
+            }
+        };
+        trace!("RX: {:02X?}", raw);
+        let Some(reply) = protocol::parse_reply(&raw) else {
+            debug!("Unparseable frame: {:02X?}", raw);
+            continue;
+        };
+        debug!(
+            "RX var=0x{:02X} values={:02X?}",
+            reply.variable, reply.values
+        );
+        cache.lock().unwrap().apply(&reply);
+        if tx.send(reply).is_err() {
+            return; // connection dropped
+        }
+    }
 }
 
 impl SerialConnection {
-    pub fn open(path: &str, baud: u32, timeout_ms: u64) -> ApiResult<Self> {
+    pub fn open(path: &str, baud: u32, timeout_ms: u64, cache: SharedCache) -> ApiResult<Self> {
         let port = tokio_serial::new(path, baud)
             .data_bits(tokio_serial::DataBits::Eight)
             .stop_bits(tokio_serial::StopBits::One)
             .parity(tokio_serial::Parity::None)
             .open_native_async()?;
 
+        let (rd, writer) = tokio::io::split(port);
+        let (tx, frames) = mpsc::unbounded_channel();
+        let dead = Arc::new(AtomicBool::new(false));
+        let reader = tokio::spawn(reader_task(rd, tx, cache.clone(), dead.clone()));
+
         Ok(Self {
-            port,
+            writer,
+            frames,
+            reader,
             timeout: Duration::from_millis(timeout_ms),
-            dead: false,
-            power_state: None,
+            dead,
+            cache,
+            verbose_ok: false,
         })
     }
 
     pub fn is_dead(&self) -> bool {
-        self.dead
+        self.dead.load(Ordering::Relaxed)
     }
 
-    /// Drain any pending data from the serial buffer.
-    async fn drain_buffer(&mut self) {
-        let mut buf = [0u8; 64];
-        loop {
-            match timeout(Duration::from_millis(10), self.port.read(&mut buf)).await {
-                Ok(Ok(0)) | Err(_) => break, // No data or timeout
-                Ok(Ok(n)) => {
-                    trace!("Drained {} bytes: {:02X?}", n, &buf[..n]);
-                }
-                Ok(Err(_)) => break,
-            }
-        }
+    fn set_power_cache(&self, on: bool) {
+        update(&mut self.cache.lock().unwrap().power, on, "power");
     }
 
-    /// Send a raw frame and read back one reply frame.
-    pub async fn send_recv(&mut self, frame: &[u8]) -> ApiResult<Reply> {
-        // Drain any stale data from buffer first
-        self.drain_buffer().await;
-
+    async fn write(&mut self, frame: &[u8]) -> ApiResult<()> {
         trace!("TX: {:02X?}", frame);
-
-        if let Err(e) = self.port.write_all(frame).await {
-            self.dead = true;
-            return Err(e.into());
-        }
-
-        let reply_bytes = match timeout(self.timeout, self.read_frame()).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(e)) => {
-                self.dead = true;
-                return Err(e);
-            }
-            Err(_) => return Err(AppError::Timeout),
-        };
-
-        trace!("RX: {:02X?}", reply_bytes);
-
-        let reply = protocol::parse_reply(&reply_bytes).ok_or(AppError::InvalidReply)?;
-        debug!(
-            "RX var=0x{:02X} values={:02X?}",
-            reply.variable, reply.values
-        );
-        Ok(reply)
-    }
-
-    /// Send a frame and discard the reply (e.g. factory reset).
-    pub async fn send_only(&mut self, frame: &[u8]) -> ApiResult<()> {
-        trace!("TX (no reply): {:02X?}", frame);
-        if let Err(e) = self.port.write_all(frame).await {
-            self.dead = true;
+        if let Err(e) = self.writer.write_all(frame).await {
+            self.dead.store(true, Ordering::Relaxed);
             return Err(e.into());
         }
         Ok(())
     }
 
-    /// Read bytes until we see an unescaped DLE ETX (0x10 0x03).
-    async fn read_frame(&mut self) -> ApiResult<Vec<u8>> {
-        let mut buf = Vec::new();
-        let mut prev_was_dle = false;
+    /// Send a raw frame and wait for its reply. Unsolicited frames that arrive
+    /// meanwhile are skipped (the reader task has already cached them).
+    pub async fn send_recv(&mut self, frame: &[u8]) -> ApiResult<Reply> {
+        // Drop frames nobody waited for (already applied to the cache).
+        while self.frames.try_recv().is_ok() {}
 
+        self.write(frame).await?;
+
+        let request_var = protocol::request_variable(frame);
+        let deadline = tokio::time::Instant::now() + self.timeout;
         loop {
-            let mut byte = [0u8; 1];
-            self.port.read_exact(&mut byte).await?;
-            let b = byte[0];
-
-            buf.push(b);
-
-            if prev_was_dle {
-                if b == protocol::ETX {
-                    return Ok(buf);
+            let reply = match tokio::time::timeout_at(deadline, self.frames.recv()).await {
+                Ok(Some(reply)) => reply,
+                Ok(None) => {
+                    self.dead.store(true, Ordering::Relaxed);
+                    return Err(AppError::Io(std::io::Error::other("serial reader stopped")));
                 }
-                // DLE DLE is an escaped DLE data byte — reset state so the
-                // next byte is treated fresh, not as "after a DLE".
-                prev_was_dle = false;
-            } else {
-                prev_was_dle = b == protocol::DLE;
+                Err(_) => {
+                    // No reply: the amp is in standby (it only answers power
+                    // commands there). set_power overrides this for its own case.
+                    self.set_power_cache(false);
+                    return Err(AppError::Timeout);
+                }
+            };
+            match request_var {
+                Some(v) if !protocol::reply_matches(v, &reply) => {
+                    debug!("Skipping unsolicited frame var=0x{:02X}", reply.variable);
+                }
+                _ => return Ok(reply),
             }
         }
+    }
+
+    /// Send a frame and discard the reply (e.g. factory reset).
+    pub async fn send_only(&mut self, frame: &[u8]) -> ApiResult<()> {
+        self.write(frame).await
     }
 
     // ---- Private helpers ----
@@ -145,52 +236,33 @@ impl SerialConnection {
     }
 
     /// Read a variable's current value via command list.
-    /// Timeout indicates the amp is likely off.
     async fn read_value(&mut self, command: CommandSpec) -> ApiResult<u8> {
-        match self.send_command(command).await {
-            Ok(reply) => reply.value().ok_or(AppError::InvalidReply),
-            Err(AppError::Timeout) => {
-                debug!("Read timed out, assuming amp is off");
-                self.power_state = Some(false);
-                Err(AppError::Timeout)
-            }
-            Err(e) => Err(e),
-        }
+        let reply = self.send_command(command).await?;
+        reply.value().ok_or(AppError::InvalidReply)
     }
 
     /// Write a value via command list, returning the confirmed value.
-    /// Timeout indicates the amp is likely off.
     async fn write_value(&mut self, command: CommandSpec, value: u8) -> ApiResult<u8> {
-        match self.send_command_value(command, value).await {
-            Ok(reply) => reply.value().ok_or(AppError::InvalidReply),
-            Err(AppError::Timeout) => {
-                debug!("Write timed out, assuming amp is off");
-                self.power_state = Some(false);
-                Err(AppError::Timeout)
-            }
-            Err(e) => Err(e),
-        }
+        let reply = self.send_command_value(command, value).await?;
+        reply.value().ok_or(AppError::InvalidReply)
     }
 
     /// Read a text (ASCII) variable using CMD_READ, returning the decoded string.
-    /// Timeout indicates the amp is likely off.
     async fn read_text(&mut self, command: CommandSpec) -> ApiResult<String> {
-        match self.send_command(command).await {
-            Ok(reply) => Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned()),
-            Err(AppError::Timeout) => {
-                debug!("Read text timed out, assuming amp is off");
-                self.power_state = Some(false);
-                Err(AppError::Timeout)
-            }
-            Err(e) => Err(e),
-        }
+        let reply = self.send_command(command).await?;
+        Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
     }
 
     // ---- Higher-level commands ----
 
+    pub fn verbose_ok(&self) -> bool {
+        self.verbose_ok
+    }
+
     pub async fn enable_verbose(&mut self) -> ApiResult<()> {
         match self.send_command(VERBOSE_ON).await {
             Ok(reply) => {
+                self.verbose_ok = true;
                 debug!(
                     "Verbose mode active (confirmed 0x{:02X})",
                     reply.value().unwrap_or(0)
@@ -198,11 +270,9 @@ impl SerialConnection {
                 Ok(())
             }
             Err(AppError::Timeout) => {
-                // Device did not reply — likely in standby or not yet ready.
-                // All state-read commands require verbose=1 to get a reply,
-                // so subsequent requests will also timeout, triggering a
-                // reconnect that will re-attempt enable_verbose.
-                warn!("Verbose enable timed out (device in standby or unresponsive)");
+                // No reply: amp in standby. AppState::get_serial retries
+                // until confirmed.
+                warn!("Verbose enable timed out (amp in standby or unresponsive)");
                 Ok(())
             }
             Err(e) => Err(e),
@@ -210,23 +280,24 @@ impl SerialConnection {
     }
 
     // --- Power ---
-    // Power state is cached from the last power operation response.
+    // Power can't be read without toggling it. It's inferred: any non-power
+    // reply means on, a timeout means standby (see AmpCache::apply).
 
-    /// Returns cached power state. Returns `false` if unknown (no power operation yet).
+    /// Cached power state (power replies, standby pushes, reply/timeout inference).
+    /// `false` if not seen since ampd started.
     pub fn get_power(&self) -> bool {
-        self.power_state.unwrap_or(false)
+        self.cache.lock().unwrap().power.unwrap_or(false)
     }
 
     pub async fn set_power(&mut self, on: bool) -> ApiResult<bool> {
-        match self.send_command(if on { POWER_ON } else { POWER_OFF }).await {
-            Ok(reply) => {
-                let state = reply.value().ok_or(AppError::InvalidReply)? == 0x01;
-                self.power_state = Some(state);
-                Ok(state)
-            }
+        match self
+            .send_command(if on { POWER_ON } else { POWER_OFF })
+            .await
+        {
+            Ok(reply) => Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01),
             Err(AppError::Timeout) => {
                 // Timeout likely means device is already in the requested state
-                self.power_state = Some(on);
+                self.set_power_cache(on);
                 Ok(on)
             }
             Err(e) => Err(e),
@@ -235,9 +306,7 @@ impl SerialConnection {
 
     pub async fn toggle_power(&mut self) -> ApiResult<bool> {
         let reply = self.send_command(POWER_TOGGLE).await?;
-        let state = reply.value().ok_or(AppError::InvalidReply)? == 0x01;
-        self.power_state = Some(state);
-        Ok(state)
+        Ok(reply.value().ok_or(AppError::InvalidReply)? == 0x01)
     }
 
     // --- Volume ---
@@ -387,8 +456,12 @@ impl SerialConnection {
         // Firmware quirk: the device returns the PREVIOUSLY queried input's name,
         // not the current one. Query twice and use the second response.
         // Note: uses 1-indexed values (0x01-0x07), as 0x00 means "current input".
-        let _ = self.send_command_value(INPUT_NAME_BY_ID_READ, input).await?;
-        let reply = self.send_command_value(INPUT_NAME_BY_ID_READ, input).await?;
+        let _ = self
+            .send_command_value(INPUT_NAME_BY_ID_READ, input)
+            .await?;
+        let reply = self
+            .send_command_value(INPUT_NAME_BY_ID_READ, input)
+            .await?;
         Ok(reply.as_text().ok_or(AppError::InvalidReply)?.to_owned())
     }
 

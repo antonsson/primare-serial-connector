@@ -2,7 +2,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::error::ApiResult;
-use crate::serial::SerialConnection;
+use crate::serial::{SerialConnection, SharedCache};
 
 pub struct SerialConfig {
     pub port: String,
@@ -13,6 +13,8 @@ pub struct SerialConfig {
 pub struct AppState {
     pub config: SerialConfig,
     pub connection: Mutex<Option<SerialConnection>>,
+    /// Amp state seen on the wire; kept across reconnects.
+    pub cache: SharedCache,
 }
 
 impl AppState {
@@ -24,6 +26,7 @@ impl AppState {
                 timeout_ms,
             },
             connection: Mutex::new(None),
+            cache: SharedCache::default(),
         }
     }
 
@@ -48,18 +51,23 @@ impl AppState {
                 &self.config.port,
                 self.config.baud,
                 self.config.timeout_ms,
+                self.cache.clone(),
             ) {
-                Ok(mut serial) => {
+                Ok(serial) => {
                     info!("Serial connection established");
-                    // Enable verbose mode once on connect so all commands return state
-                    if let Err(e) = serial.enable_verbose().await {
-                        warn!("Failed to enable verbose mode: {}", e);
-                    }
                     *guard = Some(serial);
                 }
                 Err(e) => {
                     warn!("Failed to connect to serial port: {}", e);
                     return Err(e);
+                }
+            }
+        }
+
+        if let Some(serial) = guard.as_mut() {
+            if !serial.verbose_ok() {
+                if let Err(e) = serial.enable_verbose().await {
+                    warn!("Failed to enable verbose mode: {}", e);
                 }
             }
         }

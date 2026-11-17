@@ -91,9 +91,6 @@ pub struct StatusResponse {
     pub power: bool,
     pub volume: u8,
     pub input: u8,
-    pub mute: bool,
-    pub balance: i8,
-    pub dim: u8,
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<StatusResponse>> {
@@ -103,9 +100,6 @@ async fn get_status(State(state): State<Arc<AppState>>) -> ApiResult<Json<Status
         power: conn.get_power(),
         volume: conn.get_volume().await?,
         input: conn.get_input().await?,
-        mute: false,
-        balance: 0,
-        dim: 2,
     }))
 }
 
@@ -175,7 +169,10 @@ async fn set_volume(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VolumeRequest>,
 ) -> ApiResult<Json<VolumeResponse>> {
-    info!("HTTP POST /volume level={:?} step={:?}", body.level, body.step);
+    info!(
+        "HTTP POST /volume level={:?} step={:?}",
+        body.level, body.step
+    );
     let mut conn = state.get_serial().await?;
     let volume = match (body.level, body.step) {
         (Some(level), _) => conn.set_volume(level).await?,
@@ -215,7 +212,10 @@ async fn set_input(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InputRequest>,
 ) -> ApiResult<Json<InputResponse>> {
-    info!("HTTP POST /input input={:?} step={:?}", body.input, body.step);
+    info!(
+        "HTTP POST /input input={:?} step={:?}",
+        body.input, body.step
+    );
     let mut conn = state.get_serial().await?;
     let input = match (body.input, body.step) {
         (Some(i), _) => conn.set_input(i).await?,
@@ -291,7 +291,10 @@ async fn set_balance(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BalanceRequest>,
 ) -> ApiResult<Json<BalanceResponse>> {
-    info!("HTTP POST /balance value={:?} step={:?}", body.value, body.step);
+    info!(
+        "HTTP POST /balance value={:?} step={:?}",
+        body.value, body.step
+    );
     let mut conn = state.get_serial().await?;
     let balance = match (body.value, body.step) {
         (Some(v), _) => conn.set_balance(v).await?,
