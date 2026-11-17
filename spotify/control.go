@@ -20,6 +20,7 @@ type config struct {
 	idle       time.Duration // power off after this long without Spotify playback
 	poll       time.Duration
 	card       string // /proc/asound/<card> to wait for after power on; empty skips
+	stream     string // Soloist's PipeWire stream to keep at 100%; empty disables
 }
 
 // polled is one amp status poll; started lets the loop drop polls that overlap our own writes.
@@ -34,6 +35,7 @@ type controller struct {
 	cfg config
 	amp *ampClient
 	sol *soloist
+	pin *streamPinner // nil when cfg.stream is empty
 
 	st        ampStatus // last known amp state
 	pollErrs  int
@@ -47,7 +49,11 @@ type controller struct {
 }
 
 func newController(cfg config, amp *ampClient, sol *soloist) *controller {
-	return &controller{cfg: cfg, amp: amp, sol: sol, volSignal: make(chan struct{}, 1)}
+	c := &controller{cfg: cfg, amp: amp, sol: sol, volSignal: make(chan struct{}, 1)}
+	if cfg.stream != "" {
+		c.pin = newStreamPinner(cfg.stream)
+	}
+	return c
 }
 
 func (c *controller) run(ctx context.Context) {
@@ -56,6 +62,9 @@ func (c *controller) run(ctx context.Context) {
 	go c.sol.events(ctx, events)
 	go c.pollAmp(ctx, statuses)
 	go c.volumeWriter(ctx)
+	if c.pin != nil {
+		go c.pin.run(ctx)
+	}
 	idle := time.NewTicker(30 * time.Second)
 	defer idle.Stop()
 	for {
@@ -80,6 +89,7 @@ func (c *controller) onEvent(ctx context.Context, ev event) {
 		log.Print("spotify: active")
 		c.claim(ctx)
 	case "buffering", "playing":
+		c.pin.poke() // new stream may start at Soloist's own volume
 		c.playing = true
 		if !c.owned(c.st) {
 			c.claim(ctx)
@@ -91,6 +101,7 @@ func (c *controller) onEvent(ctx context.Context, ev event) {
 		}
 		c.playing = false
 	case "volume":
+		c.pin.poke() // Soloist applies the slider to its stream; undo that
 		if time.Now().Before(c.ignoreVol) || !c.owned(c.st) {
 			return
 		}

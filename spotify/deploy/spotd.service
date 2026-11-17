@@ -7,7 +7,7 @@ Wants=soloist.service
 
 [Service]
 # Set -usb-input to the I22 input wired to USB and -card to the id in /proc/asound.
-ExecStart=%h/.local/bin/spotd -usb-input CHANGEME -card CHANGEME -max-volume 50 -idle 20m
+ExecStart=%h/.local/bin/spotd -usb-input 7 -card v10 -max-volume 50 -idle 20m
 Restart=always
 RestartSec=3
 

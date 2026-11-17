@@ -21,6 +21,7 @@ func main() {
 	flag.DurationVar(&cfg.idle, "idle", 20*time.Minute, "power off the amp after Spotify is idle this long")
 	flag.DurationVar(&cfg.poll, "poll", time.Second, "amp status poll interval")
 	flag.StringVar(&cfg.card, "card", "", "ALSA card id to wait for after power on, as in /proc/asound/<card>")
+	flag.StringVar(&cfg.stream, "stream", "spotify", "Soloist's PipeWire stream (application or node name, case-insensitive) to keep at 100% volume so only the amp sets loudness; empty disables")
 	flag.Parse()
 	if cfg.usbInput < 1 || cfg.usbInput > 7 {
 		log.Fatal("-usb-input must be 1-7")
@@ -33,6 +34,6 @@ func main() {
 	defer stop()
 	client := &http.Client{Timeout: 5 * time.Second}
 	c := newController(cfg, &ampClient{cfg.ampURL, client}, &soloist{url: cfg.soloistURL})
-	log.Printf("spotd: amp=%s soloist=%s usb-input=%d max-volume=%d", cfg.ampURL, cfg.soloistURL, cfg.usbInput, cfg.maxVolume)
+	log.Printf("spotd: amp=%s soloist=%s usb-input=%d max-volume=%d stream=%q", cfg.ampURL, cfg.soloistURL, cfg.usbInput, cfg.maxVolume, cfg.stream)
 	c.run(ctx)
 }

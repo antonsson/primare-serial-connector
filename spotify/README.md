@@ -28,7 +28,7 @@ ampd has no event stream, so spotd polls `GET /status` every second, and pauses 
 The amp counts as off after two failed polls in a row (ampd errors when the amp is in standby).
 Spotify volume events are ignored for 2 s after a takeover, so a new session can't jump the amp to an old level.
 
-**Untested:** Soloist has no documented "external volume" mode. If it also scales the samples, volume is applied twice (Soloist + amp). Check with `wpctl status` while moving the Spotify slider: the Soloist stream volume should stay at 100%.
+Soloist has no fixed-volume mode: it applies the Spotify slider as PipeWire stream volume. spotd keeps that stream at 100% (`wpctl set-volume`, on every slider change, at playback start and every 5 s), so only the amp sets loudness. You may hear a brief dip while dragging the slider before the reset lands. Soloist runs with `-i 100` so new sessions start at full stream volume.
 
 ## Build and test
 
@@ -46,16 +46,15 @@ sudo pacman -S pipewire wireplumber pipewire-pulse
 sudo loginctl enable-linger $USER        # start user services at boot without login
 systemctl --user enable --now pipewire wireplumber
 
-# Soloist: official build, see "Updating Soloist" below
-curl -fsSL https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz | tar -xz -C ~/.local/bin soloist
+# Soloist: install from the AUR (provides /usr/bin/soloist), see "Updating Soloist" below
 install -Dm600 /dev/null ~/.config/soloist/env
 echo 'SOLOIST_API_KEY=<key from developer.spotify.com/dashboard/soloist (Premium)>' > ~/.config/soloist/env
-install -Dm644 deploy/soloist.service ~/.config/systemd/user/soloist.service  # set -d CHANGEME
+install -Dm644 deploy/soloist.service ~/.config/systemd/user/soloist.service  # -d: PipeWire sink of the I22 (wpctl status)
 systemctl --user enable --now soloist
 # pick "Vardagsrum" in the Spotify app once to pair
 
 install -Dm755 spotd ~/.local/bin/spotd
-install -Dm644 deploy/spotd.service ~/.config/systemd/user/spotd.service   # set CHANGEME values
+install -Dm644 deploy/spotd.service ~/.config/systemd/user/spotd.service   # -usb-input / -card for your wiring
 systemctl --user daemon-reload
 systemctl --user enable --now spotd
 journalctl --user -fu spotd
@@ -66,7 +65,7 @@ journalctl --user -fu spotd
 Builds expire 90 days after their build date (`soloist --version` shows it). An expired build exits with code 10 and the unit stops instead of restarting, so Spotify just disappears from the device list. Update:
 
 ```bash
-curl -fsSL https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz | tar -xz -C ~/.local/bin soloist
+yay -Syu                      # or your AUR helper of choice; upgrades /usr/bin/soloist
 systemctl --user restart soloist
 ```
 
@@ -89,4 +88,5 @@ Keep the Soloist WebSocket on 127.0.0.1: it has no authentication.
 | `-card` | "" | ALSA card id to wait for after power on |
 | `-amp` | http://127.0.0.1:3000 | ampd URL |
 | `-soloist` | ws://127.0.0.1:9090 | Soloist WebSocket URL (soloist `--ws`) |
+| `-stream` | spotify | Soloist's PipeWire stream to keep at 100% (matches `application.name` or `node.name`, case-insensitive; Soloist sets both to Spotify); empty disables |
 | `-poll` | 1s | Amp status poll interval |
